@@ -1,0 +1,648 @@
+# =============================================================================
+# Dengue & P-Index: Publication-Quality Figures
+# =============================================================================
+
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(patchwork)   
+library(ggtext)      
+library(ragg)        
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+data_dir <- "~/Desktop/Publications"   # <-- change this to your folder if needed
+
+dengue_path <- file.path(data_dir, "dengue_case_2012-2021-all_inclusive.xlsx")
+indexp_path <- file.path(data_dir, "IndexP_monthlydata.xlsx")
+humid_path  <- file.path(data_dir, "humidity IDW Result by Province.xlsx")
+corr_path   <- file.path(data_dir, "Provincial-correlations-combined(2012-2021).xlsx")
+
+
+# Quick check that all files exist before doing anything else
+for (f in c(dengue_path, indexp_path, humid_path, corr_path)) {
+  if (!file.exists(f)) stop("File not found: ", f,
+                            "\nPlease update data_dir at the top of this script.")
+}
+message("All files found. Loading data...")
+
+
+
+# =============================================================================
+# SECTION 1 — Data loading & cleaning  (unchanged logic, same as before)
+# =============================================================================
+
+clean_province <- function(x) {
+  x <- gsub("\u00a0", " ", x)
+  x <- trimws(x)
+  x <- gsub("Bangkok Metropolis", "Bangkok", x, fixed = TRUE)
+  x
+}
+
+dengue <- read_excel(dengue_path) %>%
+  rename_with(tolower) %>%
+  mutate(
+    province = clean_province(province),
+    year     = as.integer(year),
+    month    = as.integer(month),
+    date     = as.Date(paste(year, sprintf("%02d", month), "01", sep = "-"))
+  )
+
+read_indexp_sheet <- function(sheet_num) {
+  raw <- read_excel(indexp_path, sheet = sheet_num, col_names = FALSE)
+  yr  <- as.integer(raw[[1]][1])
+  dat <- raw[-(1:2), ]
+  colnames(dat) <- c("row_idx", "province", as.character(1:12))
+  dat %>%
+    select(-row_idx) %>%
+    filter(!is.na(province)) %>%
+    pivot_longer(-province, names_to = "month", values_to = "P_index") %>%
+    mutate(
+      province = clean_province(as.character(province)),
+      year     = yr,
+      month    = as.integer(month),
+      P_index  = as.numeric(P_index)
+    )
+}
+
+indexp <- bind_rows(lapply(1:10, read_indexp_sheet))
+
+humid <- read_excel(humid_path) %>%
+  rename(province = Province_name, month = m, humidity = value) %>%
+  mutate(
+    province = clean_province(province),
+    year     = as.integer(year),
+    month    = as.integer(month)
+  )
+
+corr_prov <- read_excel(corr_path) %>%
+  select(Province, DF_DS, DS_Total, DF_Total) %>%
+  rename(province   = Province,
+         r_DF_DS    = DF_DS,
+         r_DS_total = DS_Total,
+         r_DF_total = DF_Total) %>%
+  mutate(province = clean_province(province))
+
+master <- dengue %>%
+  left_join(indexp,    by = c("province", "year", "month")) %>%
+  left_join(humid,     by = c("province", "year", "month")) %>%
+  left_join(corr_prov, by = "province")
+
+message("Data loaded. Master: ", nrow(master), " rows.")
+
+
+# =============================================================================
+# SECTION 2 — Key groupings
+# =============================================================================
+
+top5 <- dengue %>%
+  group_by(province) %>%
+  summarise(total = sum(total, na.rm = TRUE), .groups = "drop") %>%
+  slice_max(total, n = 5) %>%
+  pull(province)
+
+high_r <- corr_prov %>% slice_max(r_DS_total, n = 5) %>% pull(province)
+low_r  <- corr_prov %>% slice_min(r_DS_total, n = 5) %>% pull(province)
+
+month_labs <- c("Jan","Feb","Mar","Apr","May","Jun",
+                "Jul","Aug","Sep","Oct","Nov","Dec")
+
+
+# =============================================================================
+# SECTION 3 — Publication design system
+# =============================================================================
+# Palette: colourblind-safe, print-friendly
+# Primary series:  deep navy   #1B4F72
+# Secondary series:#C0392B  (muted red, not neon)
+# Accent tiers:    green #1A7A4A | amber #C47F17 | red #922B21
+# Neutral base:    white / #F8F9FA / #DEE2E6
+
+COL_CASES  <- "#1B4F72"   # navy  — dengue cases
+COL_PINDEX <- "#922B21"   # dark red — P-index
+COL_HIGH   <- "#1A7A4A"   # forest green — high performance
+COL_MOD    <- "#C47F17"   # amber — moderate
+COL_LOW    <- "#922B21"   # dark red — low performance
+COL_STRIP  <- "#F0F3F4"   # very light grey strip background
+COL_GRID   <- "#DEE2E6"   # subtle grid lines
+
+# Journal figure dimensions (mm → inches at 300 DPI)
+# Single column : 86 mm wide  (~3.39 in)
+# 1.5 column    : 114 mm wide (~4.49 in)
+# Double column : 174 mm wide (~6.85 in)
+# Max height    : 230 mm      (~9.06 in)
+W_SINGLE <- 3.39
+W_1HALF  <- 4.49
+W_DOUBLE <- 6.85
+H_MAX    <- 9.06
+
+# Save helper — writes TIFF (submission) + PDF (review) at 300 DPI
+save_fig <- function(plot, stem, width, height) {
+  # TIFF — most journals request TIFF for final submission
+  ggsave(paste0(stem, ".tiff"), plot,
+         width = width, height = height, units = "in",
+         dpi = 300, compression = "lzw", device = "tiff")
+  # PDF — vector, useful for revision / review
+  ggsave(paste0(stem, ".pdf"), plot,
+         width = width, height = height, units = "in",
+         device = cairo_pdf)
+  message("Saved: ", stem, ".tiff / .pdf")
+}
+
+# Publication-grade base theme
+# Built on theme_classic() — clean white, no background fill, minimal ink
+theme_pub <- function(base_size = 8, legend_pos = "bottom") {
+  theme_classic(base_size = base_size, base_family = "sans") +
+    theme(
+      # Axes
+      axis.line         = element_line(colour = "black", linewidth = 0.4),
+      axis.ticks        = element_line(colour = "black", linewidth = 0.3),
+      axis.ticks.length = unit(2, "pt"),
+      axis.text         = element_text(colour = "black", size = base_size - 1),
+      axis.title        = element_text(colour = "black", size = base_size,
+                                       face = "plain"),
+      # Grid — horizontal only, very faint
+      panel.grid.major.y = element_line(colour = COL_GRID, linewidth = 0.25),
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor   = element_blank(),
+      # Facet strips — light grey, black text, no bold
+      strip.background   = element_rect(fill = COL_STRIP, colour = NA),
+      strip.text         = element_text(colour = "black", size = base_size - 1,
+                                        face = "plain", margin = margin(2,2,2,2)),
+      # Legend
+      legend.position    = legend_pos,
+      legend.key.size    = unit(8, "pt"),
+      legend.text        = element_text(size = base_size - 1),
+      legend.title       = element_text(size = base_size - 1, face = "plain"),
+      legend.background  = element_blank(),
+      legend.key         = element_blank(),
+      # Titles — only used for internal drafts; remove for final submission
+      plot.title         = element_text(size = base_size, face = "bold",
+                                        margin = margin(b = 4)),
+      plot.subtitle      = element_text(size = base_size - 1, colour = "grey40",
+                                        margin = margin(b = 4)),
+      plot.margin        = margin(6, 6, 6, 6)
+    )
+}
+
+
+# =============================================================================
+# FIGURE 1 — Monthly dengue cases: top 5 provinces (2012–2021)
+#            Double-column width, stacked panels
+# =============================================================================
+
+# Province labels with total case count for context
+top5_labels <- dengue %>%
+  filter(province %in% top5) %>%
+  group_by(province) %>%
+  summarise(tot = sum(total), .groups = "drop") %>%
+  mutate(label = paste0(province, "\n(n = ", format(tot, big.mark = ","), ")")) %>%
+  select(province, label)
+
+f1_data <- master %>%
+  filter(province %in% top5) %>%
+  left_join(top5_labels, by = "province") %>%
+  mutate(label = factor(label, levels = top5_labels$label[match(top5, top5_labels$province)]))
+
+fig1 <- ggplot(f1_data, aes(x = date, y = total)) +
+  geom_area(fill = COL_CASES, alpha = 0.15, colour = NA) +
+  geom_line(colour = COL_CASES, linewidth = 0.5) +
+  facet_wrap(~label, scales = "free_y", ncol = 1) +
+  scale_x_date(
+    date_breaks = "1 year", date_labels = "%Y",
+    expand = expansion(mult = 0.01)
+  ) +
+  scale_y_continuous(
+    labels = label_comma(),
+    expand = expansion(mult = c(0, 0.08))
+  ) +
+  labs(
+    x = NULL,
+    y = "Monthly dengue cases"
+  ) +
+  theme_pub(base_size = 8) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7))
+
+print(fig1)
+
+save_fig(fig1, "fig1_monthly_cases_top5", width = W_DOUBLE, height = 7.5)
+
+
+# =============================================================================
+# FIGURE 2 — P-index overlaid on cases, top 5 provinces
+#            Dual-axis per panel; colour-coded series
+# =============================================================================
+
+f2_data <- master %>%
+  filter(province %in% top5) %>%
+  left_join(top5_labels, by = "province") %>%
+  mutate(label = factor(label, levels = top5_labels$label[match(top5, top5_labels$province)])) %>%
+  group_by(label) %>%
+  mutate(sf = max(total, na.rm = TRUE) / max(P_index, na.rm = TRUE)) %>%
+  ungroup()
+
+fig2 <- ggplot(f2_data, aes(x = date)) +
+  geom_area(aes(y = total), fill = COL_CASES, alpha = 0.12, colour = NA) +
+  geom_line(aes(y = total,        colour = "Dengue cases"),
+            linewidth = 0.55) +
+  geom_line(aes(y = P_index * sf, colour = "P-index (scaled)"),
+            linewidth = 0.6, linetype = "42") +   # refined dash pattern
+  facet_wrap(~label, scales = "free_y", ncol = 1) +
+  scale_colour_manual(
+    name   = NULL,
+    values = c("Dengue cases" = COL_CASES, "P-index (scaled)" = COL_PINDEX),
+    guide  = guide_legend(override.aes = list(linewidth = 1))
+  ) +
+  scale_x_date(
+    date_breaks = "1 year", date_labels = "%Y",
+    expand = expansion(mult = 0.01)
+  ) +
+  scale_y_continuous(
+    labels = label_comma(),
+    expand = expansion(mult = c(0, 0.1))
+  ) +
+  labs(
+    x = NULL,
+    y = "Monthly cases  |  P-index (scaled to cases axis)"
+  ) +
+  theme_pub(base_size = 8, legend_pos = "top") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7))
+
+print(fig2)
+
+save_fig(fig2, "fig2_pindex_overlay_top5", width = W_DOUBLE, height = 7.5)
+
+
+# =============================================================================
+# FIGURE 3 — High vs low P-index performance (3 + 3 provinces)
+#            2 × 3 panel grid; clear visual comparison
+# =============================================================================
+
+compare_provs <- c(high_r[1:3], low_r[1:3])
+
+# Build per-province r labels for strip
+r_labels <- corr_prov %>%
+  filter(province %in% compare_provs) %>%
+  mutate(
+    strip_label = paste0(province, "  (r = ", sprintf("%.2f", r_DS_total), ")"),
+    perf_group  = if_else(province %in% high_r, "High correlation", "Low correlation")
+  ) %>%
+  select(province, strip_label, perf_group)
+
+f3_data <- master %>%
+  filter(province %in% compare_provs) %>%
+  left_join(r_labels, by = "province") %>%
+  group_by(province) %>%
+  mutate(sf = max(total, na.rm = TRUE) / max(P_index, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(
+    strip_label = factor(strip_label,
+                         levels = r_labels$strip_label[match(compare_provs, r_labels$province)]),
+    perf_group  = factor(perf_group,
+                         levels = c("High correlation", "Low correlation"))
+  )
+
+fig3 <- ggplot(f3_data, aes(x = date)) +
+  geom_area(aes(y = total), fill = COL_CASES, alpha = 0.12, colour = NA) +
+  geom_line(aes(y = total,        colour = "Dengue cases"),    linewidth = 0.55) +
+  geom_line(aes(y = P_index * sf, colour = "P-index (scaled)"),
+            linewidth = 0.6, linetype = "42") +
+  facet_wrap(perf_group ~ strip_label, scales = "free_y",
+             ncol = 2, labeller = labeller(strip_label = label_value,
+                                           perf_group  = label_value)) +
+  scale_colour_manual(
+    name   = NULL,
+    values = c("Dengue cases" = COL_CASES, "P-index (scaled)" = COL_PINDEX),
+    guide  = guide_legend(override.aes = list(linewidth = 1))
+  ) +
+  scale_x_date(date_breaks = "2 years", date_labels = "%Y",
+               expand = expansion(mult = 0.01)) +
+  scale_y_continuous(labels = label_comma(),
+                     expand = expansion(mult = c(0, 0.1))) +
+  labs(x = NULL,
+       y = "Monthly cases  |  P-index (scaled)") +
+  theme_pub(base_size = 8, legend_pos = "top") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7))
+
+print(fig3)
+
+save_fig(fig3, "fig3_high_vs_low_performance", width = W_DOUBLE, height = 6.5)
+
+
+# =============================================================================
+# FIGURE 4 — Province × year heatmap of mean P-index
+#            Single sequential palette; annotations for weak years
+# =============================================================================
+
+weak_years <- c(2013, 2016, 2021)
+
+f4_data <- indexp %>%
+  group_by(province, year) %>%
+  summarise(mean_P = mean(P_index, na.rm = TRUE), .groups = "drop") %>%
+  mutate(province = reorder(province, mean_P))
+
+# Year-level median r from Table 1 (for annotation)
+table1 <- tibble(
+  year           = 2012:2021,
+  median_r_total = c(0.649, 0.303, 0.591, 0.775, 0.407,
+                     0.621, 0.646, 0.527, 0.483, 0.161),
+  pct_above_half = c(72.7, 19.5, 68.8, 87.0, 33.8,
+                     61.0, 64.9, 54.5, 45.5, 16.9)
+)
+
+fig4 <- ggplot(f4_data, aes(x = factor(year), y = province, fill = mean_P)) +
+  geom_tile(colour = "white", linewidth = 0.15) +
+  # Weak-year annotation: light red shading + label at top
+  annotate("rect",
+           xmin  = c(2, 5, 10) - 0.5, xmax = c(2, 5, 10) + 0.5,
+           ymin  = -Inf, ymax = Inf,
+           alpha = 0.2, fill = "#922B21") +
+  annotate("text",
+           x = c(2, 5, 10), y = Inf,
+           label = c("2013", "2016", "2021"),
+           colour = "#922B21", size = 2.2, vjust = -0.4, fontface = "italic") +
+  scale_fill_distiller(
+    palette  = "YlOrRd",
+    direction = 1,
+    name     = "Mean\nP-index",
+    limits   = c(0.4, 1),
+    breaks   = seq(0.4, 1, 0.2),
+    labels   = seq(0.4, 1, 0.2),
+    guide    = guide_colourbar(
+      barwidth  = unit(3, "cm"),
+      barheight = unit(0.3, "cm"),
+      title.position = "top",
+      title.hjust    = 0.5
+    )
+  ) +
+  scale_x_discrete(expand = c(0, 0)) +
+  scale_y_discrete(expand = c(0, 0)) +
+  labs(x = "Year", y = NULL) +
+  theme_pub(base_size = 7) +
+  theme(
+    legend.position  = "top",
+    axis.line        = element_blank(),
+    axis.ticks       = element_blank(),
+    axis.text.y      = element_text(size = 5.5),
+    panel.border     = element_rect(colour = "grey60", fill = NA, linewidth = 0.3),
+    plot.margin      = margin(12, 6, 6, 6)
+  )
+
+print(fig4)
+
+save_fig(fig4, "fig4_pindex_heatmap", width = W_DOUBLE, height = H_MAX)
+
+
+# =============================================================================
+# FIGURE 5 — Year-level performance summary (Table 1 visualised)
+#            Bar + line combo; clean dual-axis
+# =============================================================================
+
+fig5 <- ggplot(table1, aes(x = factor(year))) +
+  # Bars: % provinces with r > 0.5
+  geom_col(aes(y = pct_above_half / 100),
+           fill = "grey75", colour = "grey50", linewidth = 0.3, width = 0.55) +
+  # Reference line at 50%
+  geom_hline(yintercept = 0.5, linetype = "dashed",
+             colour = "grey40", linewidth = 0.35) +
+  # Line: median r
+  geom_line(aes(y = median_r_total, group = 1),
+            colour = COL_PINDEX, linewidth = 0.8) +
+  geom_point(aes(y = median_r_total),
+             colour = COL_PINDEX, size = 2.2, shape = 21,
+             fill = "white", stroke = 1) +
+  # Value labels above points
+  geom_text(aes(y = median_r_total + 0.05,
+                label = sprintf("%.2f", median_r_total)),
+            colour = COL_PINDEX, size = 2.2, fontface = "plain") +
+  scale_y_continuous(
+    name     = "Median Pearson r",
+    limits   = c(0, 1.05),
+    breaks   = seq(0, 1, 0.2),
+    expand   = c(0, 0),
+    sec.axis = sec_axis(
+      ~ . * 100,
+      name   = "Provinces with r > 0.50 (%)",
+      breaks = seq(0, 100, 20)
+    )
+  ) +
+  labs(x = "Year") +
+  theme_pub(base_size = 8) +
+  theme(
+    axis.text.x        = element_text(angle = 0, hjust = 0.5, size = 8),
+    axis.title.y.left  = element_text(colour = COL_PINDEX),
+    axis.title.y.right = element_text(colour = "grey40"),
+    axis.line.y.right  = element_line(colour = "grey40", linewidth = 0.4),
+    axis.ticks.y.right = element_line(colour = "grey40"),
+    axis.text.y.right  = element_text(colour = "grey40"),
+    panel.grid.major.y = element_line(colour = COL_GRID, linewidth = 0.25)
+  )
+
+print(fig5)
+
+save_fig(fig5, "fig5_year_summary", width = W_DOUBLE, height = 2.8)
+
+
+# =============================================================================
+# FIGURE 6 — Province-level Pearson r dot-plot (all 77 provinces)
+#            Cleveland dot-plot; performance tiers
+# =============================================================================
+
+f6_data <- corr_prov %>%
+  mutate(
+    tier = case_when(
+      r_DS_total >= 0.9  ~ paste0("High (r \u2265 0.90, n = ",
+                                  sum(r_DS_total >= 0.9), ")"),
+      r_DS_total >= 0.7  ~ paste0("Moderate (0.70\u2013<0.90, n = ",
+                                  sum(r_DS_total >= 0.7 & r_DS_total < 0.9), ")"),
+      TRUE               ~ paste0("Low (r < 0.70, n = ",
+                                  sum(r_DS_total < 0.7), ")")
+    )
+  ) %>%
+  # Fix factor order (compute counts first)
+  mutate(
+    tier = factor(tier, levels = unique(tier[order(
+      c("High","Moderate","Low")[
+        match(sub(" \\(.*","",tier), c("High","Moderate","Low"))
+      ]
+    )]))
+  )
+
+# Reorder tier levels cleanly
+f6_data <- f6_data %>%
+  mutate(tier = factor(
+    case_when(
+      r_DS_total >= 0.9 ~ "High",
+      r_DS_total >= 0.7 ~ "Moderate",
+      TRUE              ~ "Low"
+    ),
+    levels = c("High", "Moderate", "Low")
+  ))
+
+fig6 <- ggplot(f6_data,
+               aes(x = r_DS_total,
+                   y = reorder(province, r_DS_total),
+                   colour = tier)) +
+  geom_segment(aes(xend = 0.4, yend = province),  # start at 0.4 not 0 (cleaner)
+               colour = COL_GRID, linewidth = 0.35) +
+  geom_point(size = 1.6) +
+  geom_vline(xintercept = 0.50, linetype = "dashed",
+             colour = "grey40", linewidth = 0.35) +
+  geom_vline(xintercept = 0.70, linetype = "dotted",
+             colour = "grey55", linewidth = 0.3) +
+  scale_colour_manual(
+    name   = "Correlation tier",
+    values = c("High" = COL_HIGH, "Moderate" = COL_MOD, "Low" = COL_LOW),
+    guide  = guide_legend(override.aes = list(size = 2.5))
+  ) +
+  scale_x_continuous(
+    limits = c(0.35, 1.02),
+    breaks = seq(0.4, 1, 0.1),
+    expand = c(0, 0)
+  ) +
+  labs(x = "Spearman r (P-index vs. total dengue cases, pooled 2012\u20132021)",
+       y = NULL) +
+  theme_pub(base_size = 7, legend_pos = "bottom") +
+  theme(
+    axis.text.y        = element_text(size = 5.5),
+    panel.grid.major.y = element_blank(),
+    panel.grid.major.x = element_line(colour = COL_GRID, linewidth = 0.25),
+    axis.line.y        = element_blank(),
+    axis.ticks.y       = element_blank()
+  )
+
+print(fig6)
+
+save_fig(fig6, "fig6_province_r_dotplot", width = W_DOUBLE, height = H_MAX)
+
+
+# =============================================================================
+# FIGURE 7 — Seasonal P-index profile by performance tier
+#            Ribbon + line; median ± IQR
+# =============================================================================
+
+f7_data <- indexp %>%
+  left_join(corr_prov %>% select(province, r_DS_total), by = "province") %>%
+  filter(!is.na(r_DS_total)) %>%
+  mutate(
+    tier = case_when(
+      r_DS_total >= 0.9 ~ "High",
+      r_DS_total >= 0.7 ~ "Moderate",
+      TRUE              ~ "Low"
+    ),
+    tier = factor(tier, levels = c("High", "Moderate", "Low"))
+  ) %>%
+  group_by(tier, month) %>%
+  summarise(
+    med = median(P_index, na.rm = TRUE),
+    lo  = quantile(P_index, 0.25, na.rm = TRUE),
+    hi  = quantile(P_index, 0.75, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+tier_colours <- c("High" = COL_HIGH, "Moderate" = COL_MOD, "Low" = COL_LOW)
+tier_labels  <- c("High" = "High (r \u2265 0.90)",
+                  "Moderate" = "Moderate (0.70\u2013<0.90)",
+                  "Low" = "Low (r < 0.70)")
+
+fig7 <- ggplot(f7_data, aes(x = month, colour = tier, fill = tier, group = tier)) +
+  geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.12, colour = NA) +
+  geom_line(aes(y = med), linewidth = 0.8) +
+  geom_point(aes(y = med), size = 1.8, shape = 21,
+             fill = "white", stroke = 1) +
+  scale_x_continuous(breaks = 1:12, labels = month_labs,
+                     expand = expansion(mult = 0.02)) +
+  scale_y_continuous(limits = c(0.4, 1), breaks = seq(0.4, 1, 0.1),
+                     expand = c(0, 0)) +
+  scale_colour_manual(values = tier_colours, labels = tier_labels,
+                      name = "Correlation tier") +
+  scale_fill_manual(  values = tier_colours, labels = tier_labels,
+                      name = "Correlation tier") +
+  labs(x = "Month",
+       y = "P-index (median \u00b1 IQR)") +
+  guides(colour = guide_legend(override.aes = list(linewidth = 1, size = 2.5)),
+         fill   = "none") +
+  theme_pub(base_size = 8, legend_pos = "bottom") +
+  theme(
+    axis.text.x        = element_text(angle = 0, hjust = 0.5),
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_line(colour = COL_GRID, linewidth = 0.25)
+  )
+
+print(fig7)
+
+save_fig(fig7, "fig7_seasonal_pindex_tiers", width = W_DOUBLE, height = 2.8)
+
+
+# =============================================================================
+# FIGURE 8 — Annual cases vs mean P-index scatter
+#            Shaped by year-group; regression line with CI
+# =============================================================================
+
+f8_data <- master %>%
+  group_by(province, year) %>%
+  summarise(
+    annual_cases = sum(total, na.rm = TRUE),
+    mean_P       = mean(P_index, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(mean_P), annual_cases > 0) %>%
+  mutate(
+    year_group = case_when(
+      year %in% c(2013, 2016, 2021) ~ "Low-performance year",
+      TRUE                          ~ "Other year"
+    ),
+    year_group = factor(year_group,
+                        levels = c("Other year", "Low-performance year"))
+  )
+
+fig8 <- ggplot(f8_data, aes(x = mean_P, y = annual_cases)) +
+  geom_point(aes(colour = year_group, shape = year_group),
+             alpha = 0.6, size = 1.4) +
+  geom_smooth(method = "lm", se = TRUE,
+              colour = "black", fill = "grey85",
+              linewidth = 0.7, linetype = "solid") +
+  scale_colour_manual(
+    name   = NULL,
+    values = c("Other year" = COL_CASES, "Low-performance year" = COL_PINDEX)
+  ) +
+  scale_shape_manual(
+    name   = NULL,
+    values = c("Other year" = 16, "Low-performance year" = 17)
+  ) +
+  scale_y_log10(
+    labels = label_comma(),
+    breaks = c(10, 100, 1000, 10000, 100000)
+  ) +
+  scale_x_continuous(limits = c(0.45, 0.95), breaks = seq(0.5, 0.9, 0.1)) +
+  labs(
+    x = "Annual mean P-index",
+    y = "Annual dengue cases (log\u2081\u2080 scale)"
+  ) +
+  guides(colour = guide_legend(override.aes = list(size = 2.5, alpha = 1)),
+         shape  = guide_legend(override.aes = list(size = 2.5, alpha = 1))) +
+  theme_pub(base_size = 8, legend_pos = "bottom") +
+  theme(
+    panel.grid.major.y = element_line(colour = COL_GRID, linewidth = 0.25),
+    panel.grid.major.x = element_blank()
+  )
+
+
+print(fig8)
+save_fig(fig8, "fig8_scatter_pindex_cases", width = W_1HALF, height = 3.2)
+
+
+# =============================================================================
+# Done
+# =============================================================================
+message("\n\u2713 All 8 publication figures saved (TIFF + PDF).")
+message("  fig1 - Monthly cases: top 5 provinces")
+message("  fig2 - P-index overlay: top 5 provinces")
+message("  fig3 - High vs low performance comparison")
+message("  fig4 - P-index heatmap (province x year)")
+message("  fig5 - Year-level summary (Table 1)")
+message("  fig6 - Province-level r dot-plot")
+message("  fig7 - Seasonal P-index profile by tier")
+message("  fig8 - Annual cases vs P-index scatter")
+message("\nTIFFs are ready for journal submission.")
+message("PDFs are vector files suitable for revision and review.")
