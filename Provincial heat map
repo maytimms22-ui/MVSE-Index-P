@@ -1,0 +1,267 @@
+# ============================================================
+# Thailand Provincial Humidity Index – Choropleth Maps
+# 2012–2021  (annual mean of monthly index values)
+# ============================================================
+
+# ── 1. Packages ──────────────────────────────────────────────
+pkgs <- c("readxl", "ggplot2", "dplyr", "tidyr", "sf",
+          "scales", "patchwork", "viridis", "geodata",
+          "cowplot", "stringr", "stringi")
+
+for (p in pkgs) {
+  if (!requireNamespace(p, quietly = TRUE)) install.packages(p)
+}
+
+library(readxl)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(sf)
+library(scales)
+library(patchwork)
+library(viridis)
+library(cowplot)
+library(stringr)
+library(stringi)
+
+# ── 2. Thailand provincial shapefile ─────────────────────────
+thai_sf <- geodata::gadm("Thailand", level = 1,
+                         path = tempdir(), resolution = 2) |>
+  st_as_sf()
+
+message("Shapefile name column sample: ",
+        paste(thai_sf$NAME_1[1:5], collapse = ", "))
+
+# ── 3. Load & reshape IndexP data ────────────────────────────
+# ── Set your file path ───────────────────────────────────────
+# Option A: use the same folder as this script (recommended)
+if (!requireNamespace("here", quietly = TRUE)) install.packages("here")
+library(here)
+file_path <- here("IndexP_monthlydata.xlsx")
+
+# Option B: paste your full path directly, e.g.:
+# file_path <- "C:/Users/YourName/Documents/IndexP_monthlydata.xlsx"  # Windows
+# file_path <- "/Users/YourName/Documents/IndexP_monthlydata.xlsx"    # Mac/Linux
+
+file_path <- "/Users/megantimms/Desktop/Publications/IndexP_monthlydata.xlsx" 
+
+if (!file.exists(file_path)) {
+  stop("File not found: ", file_path,
+       "\nEither place IndexP_monthlydata.xlsx in the same folder as this script,",
+       "\nor set file_path manually using Option B above.")
+}
+message("Using file: ", file_path)
+
+years <- 2012:2021
+
+read_year <- function(sheet_idx, year) {
+  # Row 0 = year label, Row 1 = header (Province, 1..12), Row 2+ = data
+  df <- read_excel(file_path,
+                   sheet     = sheet_idx,
+                   col_names = FALSE,   # read everything raw
+                   .name_repair = "minimal")
+  
+  # Row 2 (index 2) is the actual header; rows 3+ are data
+  colnames(df) <- c("row_num", "Province", as.character(1:12))
+  df <- df[-c(1, 2), ]          # drop year-label row and header row
+  df <- df[, -1]                 # drop row_num column
+  
+  df <- df |>
+    filter(!is.na(Province), Province != "") |>
+    mutate(
+      # Remove non-breaking spaces and trim whitespace
+      Province = stringi::stri_trans_general(Province, "Any-Latin"),
+      Province = str_replace_all(Province, "\u00a0", " "),
+      Province = str_trim(Province),
+      across(`1`:`12`, as.numeric),
+      Year = year
+    )
+  
+  df
+}
+
+index_raw <- mapply(read_year, seq_along(years), years,
+                    SIMPLIFY = FALSE) |>
+  bind_rows()
+
+message("Loaded ", nrow(index_raw), " province-year rows across ",
+        n_distinct(index_raw$Province), " provinces.")
+
+# Annual mean index per province per year
+annual_mean <- index_raw |>
+  pivot_longer(cols = `1`:`12`,
+               names_to  = "Month",
+               values_to = "Index") |>
+  group_by(Province, Year) |>
+  summarise(MeanIndex = mean(Index, na.rm = TRUE), .groups = "drop")
+
+# ── 4. Province name harmonisation ───────────────────────────
+# Maps data names → GADM NAME_1 spellings
+# Run this once to see all GADM province names and find the right Bangkok spelling:
+# sort(thai_sf$NAME_1)
+
+name_fix <- c(
+  "Bangkok Metropolis" = "Bangkok Metropolis",  # GADM spelling for Bangkok
+  "Phra Nakhon Si Ayutthaya" = "Phra Nakhon Si Ayutthaya",
+  "Si Sa Ket"                = "Si Sa Ket",
+  "Nong Bua Lam Phu"         = "Nong Bua Lam Phu"
+)
+
+# Safety check: print all GADM names so you can verify any remaining mismatches
+message("All GADM province names:")
+message(paste(sort(thai_sf$NAME_1), collapse = ", "))
+
+annual_mean <- annual_mean |>
+  mutate(Province_gadm = if_else(Province %in% names(name_fix),
+                                 name_fix[Province],
+                                 Province))
+
+# Report unmatched after join attempt
+unmatched <- anti_join(
+  annual_mean |> distinct(Province_gadm),
+  thai_sf     |> st_drop_geometry() |> distinct(NAME_1),
+  by = c("Province_gadm" = "NAME_1")
+)
+if (nrow(unmatched) > 0) {
+  message("Unmatched provinces (will appear grey):")
+  print(unmatched)
+}
+
+# ── 5. Join to shapefile ──────────────────────────────────────
+# crossing() strips the sf geometry column, so replicate per year with lapply
+thai_base <- thai_sf |> select(NAME_1, geometry)
+
+thai_long <- lapply(years, function(yr) {
+  thai_base |>
+    left_join(annual_mean |> filter(Year == yr),
+              by = c("NAME_1" = "Province_gadm")) |>
+    mutate(Year = yr)
+}) |>
+  bind_rows() |>
+  st_as_sf()
+
+# ── 6. Colour limits ─────────────────────────────────────────
+idx_range <- range(thai_long$MeanIndex, na.rm = TRUE)
+message(sprintf("Index range: %.3f – %.3f", idx_range[1], idx_range[2]))
+
+# ── 7. Per-year map function ──────────────────────────────────
+make_map <- function(yr) {
+  ggplot(thai_long |> filter(Year == yr)) +
+    geom_sf(aes(fill = MeanIndex), colour = "white", linewidth = 0.15) +
+    scale_fill_viridis_c(
+      option   = "plasma",
+      name     = "Index",
+      limits   = c(0.35, 0.90),
+      oob      = squish,
+      na.value = "grey85"
+    ) +
+    labs(title = as.character(yr)) +
+    theme_void(base_size = 9) +
+    theme(
+      plot.title      = element_text(face = "bold", hjust = 0.5,
+                                     size = 10, margin = margin(b = 3)),
+      legend.position = "none"
+    )
+}
+
+# ── 8. Shared legend ──────────────────────────────────────────
+legend_plot <- ggplot(thai_long |> filter(Year == 2016)) +
+  geom_sf(aes(fill = MeanIndex), colour = "white", linewidth = 0.15) +
+  scale_fill_viridis_c(
+    option   = "plasma",
+    name     = "Annual Mean\nHumidity Index",
+    limits   = c(0.35, 0.90),
+    oob      = squish,
+    breaks   = seq(0.35, 0.90, by = 0.10),
+    labels   = number_format(accuracy = 0.01),
+    na.value = "grey85",
+    guide    = guide_colorbar(
+      barwidth       = 1.2,
+      barheight      = 14,
+      ticks.colour   = "grey40",
+      title.position = "top",
+      title.hjust    = 0.5
+    )
+  ) +
+  theme_void() +
+  theme(
+    legend.position = "right",
+    legend.title    = element_text(size = 9, face = "bold"),
+    legend.text     = element_text(size = 8)
+  )
+
+shared_legend <- get_legend(legend_plot)
+
+# ── 9. Assemble 2 × 5 panel ───────────────────────────────────
+plots <- lapply(years, make_map)
+
+panel <- plot_grid(
+  plot_grid(plotlist = plots[1:5],  nrow = 1),
+  plot_grid(plotlist = plots[6:10], nrow = 1),
+  ncol = 1
+)
+
+title_row <- ggdraw() +
+  draw_label(
+    "Thailand Provincial Humidity Index  ·  Annual Mean  ·  2012–2021",
+    fontface = "bold", x = 0.5, hjust = 0.5, size = 11
+  ) +
+  draw_label(
+    paste("Higher values (yellow/white) = more humid.",
+          "Lower values (dark purple) = drier conditions."),
+    x = 0.5, hjust = 0.5, size = 8, y = 0.20, colour = "grey35"
+  )
+
+final <- plot_grid(
+  title_row,
+  plot_grid(panel, shared_legend, rel_widths = c(1, 0.065), nrow = 1),
+  ncol = 1, rel_heights = c(0.07, 1)
+)
+
+print(final)
+
+ggsavefinalggsave("provincial_heatindex_map.png",
+       plot = final, width = 20, height = 11,
+       dpi = 200, bg = "white")
+message("✓ Saved: provincial_heatindex_map.png")
+
+# ── 10. Optional: single-year detail map ─────────────────────
+single_year <- 2019   # change to any year 2012–2021
+
+p_single <- ggplot(thai_long |> filter(Year == single_year)) +
+  geom_sf(aes(fill = MeanIndex), colour = "white", linewidth = 0.25) +
+  scale_fill_viridis_c(
+    option   = "plasma",
+    name     = "Humidity Index",
+    limits   = c(0.35, 0.90),
+    oob      = squish,
+    breaks   = seq(0.35, 0.90, by = 0.05),
+    labels   = number_format(accuracy = 0.01),
+    na.value = "grey85",
+    guide    = guide_colorbar(barwidth = 1.5, barheight = 18,
+                              ticks.colour  = "grey40",
+                              title.position = "top", title.hjust = 0.5)
+  ) +
+  labs(
+    title    = paste("Thailand Humidity Index –", single_year),
+    subtitle = "Annual mean of monthly provincial humidity index (IndexP)",
+    caption  = "Data: IndexP_monthlydata.xlsx"
+  ) +
+  theme_void(base_size = 11) +
+  theme(
+    plot.title      = element_text(face = "bold", size = 14, hjust = 0.5,
+                                   margin = margin(b = 4)),
+    plot.subtitle   = element_text(size = 9, hjust = 0.5, colour = "grey35",
+                                   margin = margin(b = 8)),
+    plot.caption    = element_text(size = 7.5, hjust = 1, colour = "grey50",
+                                   margin = margin(t = 6)),
+    plot.margin     = margin(12, 12, 8, 12),
+    legend.position = "right",
+    legend.title    = element_text(size = 9, face = "bold"),
+    legend.text     = element_text(size = 8)
+  )
+
+ggsave(paste0("provincial_heatindex_", single_year, ".png"),
+       plot = p_single, width = 10, height = 12,
+       dpi = 200, bg = "white")
+message("✓ Saved single-year map for ", single_year)
