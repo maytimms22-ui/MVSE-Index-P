@@ -1,0 +1,96 @@
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(scales)
+       
+dengue_data_with_date <- dengue_data %>%
+  mutate(
+    date = make_date(year, month, 1),  # First day of each month
+    month_year = format(date, "%Y-%m")
+  )
+  # Calculate national monthly totals and correlations
+  national_monthly <- dengue_data_with_date %>%
+    group_by(date, month_year, year, month) %>%
+    summarize(
+      # Total cases nationally
+      total_cases = sum(Total, na.rm = TRUE),
+      total_DF = sum(DF, na.rm = TRUE),
+      total_DS = sum(DS, na.rm = TRUE),
+      
+      # Calculate national-level correlations
+      df_ds_correlation = cor(DF, DS, method = "spearman", use = "complete.obs"),
+      ds_total_correlation = cor(DS, Total, method = "spearman", use = "complete.obs"),
+      total_df_correlation = cor(Total, DF, method = "spearman", use = "complete.obs"),
+      
+      # Count provinces with data for correlation calculation
+      n_provinces = n(),
+      n_provinces_with_correlation = sum(!is.na(DF) & !is.na(DS)),
+      
+      .groups = 'drop'
+    ) %>%
+    arrange(date)
+
+  print(head(national_monthly))
+  print(paste("Total months:", nrow(national_monthly)))
+  
+  national_monthly <- national_monthly %>%
+    mutate(
+      p_index = ifelse(total_cases > 0, total_DS / total_cases, 0)
+    )
+  
+  # Create the comprehensive time series plot
+  time_series_plot <- ggplot(national_monthly, aes(x = date)) +
+    # First Y-axis: Cases and P-index
+    geom_line(aes(y = total_cases, color = "Total Dengue Cases"), size = 1) +
+    geom_line(aes(y = total_DF, color = "DF Cases"), size = 0.8, linetype = "dashed") +
+    geom_line(aes(y = total_DS, color = "DS Cases"), size = 0.8, linetype = "dotted") +
+    geom_line(aes(y = p_index * max(total_cases, na.rm = TRUE), color = "P-Index"), 
+              size = 1, linetype = "longdash") +
+    # Second Y-axis: Correlations (scaled to fit)
+    geom_line(aes(y = df_ds_correlation * max(total_cases, na.rm = TRUE) / 2, 
+                  color = "DF vs DS Correlation"), size = 1) +
+    geom_line(aes(y = ds_total_correlation * max(total_cases, na.rm = TRUE) / 2, 
+                  color = "DS vs Total Correlation"), size = 1) +
+    geom_line(aes(y = total_df_correlation * max(total_cases, na.rm = TRUE) / 2, 
+                  color = "Total vs DF Correlation"), size = 1) +
+    # Dual Y-axes
+    scale_y_continuous(
+      name = "Number of Dengue Cases",
+      sec.axis = sec_axis(~ . / (max(national_monthly$total_cases, na.rm = TRUE) / 2), 
+                          name = "Spearman Correlation Coefficient",
+                          breaks = c(-1, -0.5, 0, 0.5, 1))
+    ) +
+    # Color scheme
+    scale_color_manual(
+      name = "Metrics",
+      values = c(
+        "Total Dengue Cases" = "red",
+        "DF Cases" = "blue",
+        "DS Cases" = "purple",
+        "P-Index" = "orange",
+        "DF vs DS Correlation" = "darkgreen",
+        "DS vs Total Correlation" = "brown",
+        "Total vs DF Correlation" = "darkcyan"
+      )
+    ) +
+    # Labels and theme
+    labs(
+      title = "National-Level Dengue Trends: Cases, P-Index, and Correlations",
+      subtitle = "120-Month Time Series (2012-2021)",
+      x = "Time",
+      caption = "Note: Correlations scaled to fit secondary Y-axis"
+    ) +
+    
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+      plot.subtitle = element_text(hjust = 0.5, size = 12),
+      plot.caption = element_text(hjust = 0, size = 9, color = "darkgray"),
+      axis.title.y = element_text(color = "red"),
+      axis.title.y.right = element_text(color = "darkgreen"),
+      legend.position = "bottom",
+      legend.box = "vertical",
+      legend.text = element_text(size = 9)
+    )
+  
+  print(time_series_plot)
