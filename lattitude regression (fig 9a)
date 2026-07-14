@@ -1,0 +1,132 @@
+# =============================================================================
+# Monsoon vs Non-Monsoon Provincial Correlation Heatmap: 2012–2021
+# Monsoon    = May–Oct  (months 5–10)
+# Non-Monsoon = Nov–Apr (months 11–12, 1–4)
+# Correlation = Spearman r between province's seasonal monthly IndexP
+#               and the national seasonal monthly mean for that year.
+# =============================================================================
+
+install.packages(c("readxl", "dplyr", "tidyr", "ggplot2", "scales", "RColorBrewer", "patchwork"))
+library(readxl); library(dplyr); library(tidyr); library(ggplot2)
+library(scales);  library(RColorBrewer); library(patchwork)
+
+setwd("/Users/megantimms/Desktop/Publications")
+indexP_file     <- "IndexP_monthlydata.xlsx"
+monsoon_months  <- c(5, 6, 7, 8, 9, 10)          # May–Oct
+nonmon_months   <- c(11, 12, 1, 2, 3, 4)          # Nov–Apr
+
+sheet_names <- excel_sheets(indexP_file)
+
+parse_sheet <- function(sname) {
+  raw  <- read_excel(indexP_file, sheet = sname, col_names = FALSE)
+  year <- as.integer(raw[[1, 1]])
+  valid_rows <- which(
+    !is.na(raw[[2]]) &
+      !grepl("^Province$", trimws(raw[[2]]), ignore.case = TRUE) &
+      trimws(raw[[2]]) != ""
+  )
+  tibble(
+    Province = trimws(gsub("\u00a0", " ", as.character(raw[valid_rows, 2, drop = TRUE]))),
+    Year = year,
+    m1  = as.numeric(raw[valid_rows,  3, drop = TRUE]),
+    m2  = as.numeric(raw[valid_rows,  4, drop = TRUE]),
+    m3  = as.numeric(raw[valid_rows,  5, drop = TRUE]),
+    m4  = as.numeric(raw[valid_rows,  6, drop = TRUE]),
+    m5  = as.numeric(raw[valid_rows,  7, drop = TRUE]),
+    m6  = as.numeric(raw[valid_rows,  8, drop = TRUE]),
+    m7  = as.numeric(raw[valid_rows,  9, drop = TRUE]),
+    m8  = as.numeric(raw[valid_rows, 10, drop = TRUE]),
+    m9  = as.numeric(raw[valid_rows, 11, drop = TRUE]),
+    m10 = as.numeric(raw[valid_rows, 12, drop = TRUE]),
+    m11 = as.numeric(raw[valid_rows, 13, drop = TRUE]),
+    m12 = as.numeric(raw[valid_rows, 14, drop = TRUE])
+  )
+}
+
+all_data <- bind_rows(lapply(sheet_names, parse_sheet))
+
+mon_cols    <- paste0("m", monsoon_months)
+nonmon_cols <- paste0("m", nonmon_months)
+
+compute_corr <- function(df, season_cols) {
+  df %>%
+    group_by(Year) %>%
+    mutate(across(all_of(season_cols),
+                  ~ mean(.x, na.rm = TRUE),
+                  .names = "nat_{.col}")) %>%
+    ungroup() %>%
+    rowwise() %>%
+    mutate(
+      prov_vec = list(c_across(all_of(season_cols))),
+      nat_vec  = list(c_across(starts_with("nat_"))),
+      r        = cor(unlist(prov_vec), unlist(nat_vec), use = "complete.obs")
+    ) %>%
+    ungroup() %>%
+    select(Province, Year, r)
+}
+
+corr_mon    <- compute_corr(all_data, mon_cols)    %>% rename(Monsoon    = r)
+corr_nonmon <- compute_corr(all_data, nonmon_cols) %>% rename(NonMonsoon = r)
+
+corr_combined <- left_join(corr_mon, corr_nonmon, by = c("Province", "Year"))
+
+# Sort provinces by mean monsoon correlation (highest at top)
+prov_order <- corr_combined %>%
+  group_by(Province) %>%
+  summarise(mean_mon = mean(Monsoon, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(mean_mon)) %>%
+  pull(Province)
+
+corr_combined <- corr_combined %>%
+  mutate(Province = factor(Province, levels = prov_order))
+
+pal        <- colorRampPalette(rev(brewer.pal(11, "RdYlGn")))(100)
+fill_scale <- scale_fill_gradientn(
+  colours = pal,
+  limits  = c(-0.9, 1),
+  oob     = squish,
+  name    = "Pearson r",
+  breaks  = c(-0.9, -0.5, 0, 0.5, 1),
+  labels  = c("−0.9", "−0.5", "0", "0.5", "1.0")
+)
+
+make_heatmap <- function(data, value_col, title_label, show_legend = FALSE) {
+  ggplot(data, aes(x = factor(Year), y = Province, fill = .data[[value_col]])) +
+    geom_tile(colour = "white", linewidth = 0.3) +
+    geom_text(aes(label = sprintf("%.2f", .data[[value_col]])),
+              size = 2.0,
+              colour = ifelse(data[[value_col]] < 0.1, "white", "grey20")) +
+    fill_scale +
+    scale_x_discrete(position = "top") +
+    labs(title = title_label, x = NULL, y = NULL) +
+    theme_minimal(base_size = 10) +
+    theme(
+      plot.title        = element_text(face = "bold", size = 12, hjust = 0.5,
+                                       margin = margin(b = 6)),
+      axis.text.y       = element_text(size = 7),
+      axis.text.x       = element_text(size = 9, face = "bold"),
+      legend.position   = if (show_legend) "right" else "none",
+      legend.key.height = unit(2, "cm"),
+      legend.title      = element_text(size = 8),
+      legend.text       = element_text(size = 8),
+      panel.grid        = element_blank(),
+      plot.margin       = margin(5, 5, 5, 5)
+    )
+}
+
+p_mon    <- make_heatmap(corr_combined, "Monsoon",    "Monsoon Season  (May – Oct)",    show_legend = FALSE)
+p_nonmon <- make_heatmap(corr_combined, "NonMonsoon", "Non-Monsoon Season  (Nov – Apr)", show_legend = TRUE)
+
+p_combined <- p_mon + p_nonmon +
+  plot_annotation(
+    title    = "Provincial IndexP Correlation: Monsoon vs Non-Monsoon  |  2012–2021",
+    subtitle = "Spearman r between each province's seasonal monthly IndexP and the national seasonal mean.\nProvinces sorted by mean monsoon correlation (highest at top).",
+    theme = theme(
+      plot.title    = element_text(face = "bold", size = 14, hjust = 0.5),
+      plot.subtitle = element_text(size = 9, colour = "grey40", hjust = 0.5,
+                                   margin = margin(b = 8)),
+      plot.caption  = element_text(size = 8, colour = "grey55", hjust = 0.5)
+    )
+  )
+
+print(p_combined)
