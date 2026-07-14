@@ -1,0 +1,143 @@
+# =============================================================================
+# Monsoon vs Non-Monsoon Provincial Correlation Line Graph: 2012–2021
+# Monsoon     = May–Oct  (months 5–10)
+# Non-Monsoon = Nov–Apr  (months 11–12, 1–4)
+# Each panel: Spearman r between province's seasonal IndexP and national mean
+# =============================================================================
+
+install.packages(c("readxl", "dplyr", "tidyr", "ggplot2", "scales", "patchwork"))
+library(readxl); library(dplyr); library(tidyr); library(ggplot2)
+library(scales);  library(patchwork)
+
+setwd("/Users/megantimms/Desktop/Publications")
+indexP_file    <- "IndexP_monthlydata.xlsx"
+monsoon_months <- c(5, 6, 7, 8, 9, 10)
+nonmon_months  <- c(11, 12, 1, 2, 3, 4)
+
+sheet_names <- excel_sheets(indexP_file)
+
+parse_sheet <- function(sname) {
+  raw  <- read_excel(indexP_file, sheet = sname, col_names = FALSE)
+  year <- as.integer(raw[[1, 1]])
+  valid_rows <- which(
+    !is.na(raw[[2]]) &
+      !grepl("^Province$", trimws(raw[[2]]), ignore.case = TRUE) &
+      trimws(raw[[2]]) != ""
+  )
+  tibble(
+    Province = trimws(gsub("\u00a0", " ", as.character(raw[valid_rows, 2, drop = TRUE]))),
+    Year = year,
+    m1  = as.numeric(raw[valid_rows,  3, drop = TRUE]),
+    m2  = as.numeric(raw[valid_rows,  4, drop = TRUE]),
+    m3  = as.numeric(raw[valid_rows,  5, drop = TRUE]),
+    m4  = as.numeric(raw[valid_rows,  6, drop = TRUE]),
+    m5  = as.numeric(raw[valid_rows,  7, drop = TRUE]),
+    m6  = as.numeric(raw[valid_rows,  8, drop = TRUE]),
+    m7  = as.numeric(raw[valid_rows,  9, drop = TRUE]),
+    m8  = as.numeric(raw[valid_rows, 10, drop = TRUE]),
+    m9  = as.numeric(raw[valid_rows, 11, drop = TRUE]),
+    m10 = as.numeric(raw[valid_rows, 12, drop = TRUE]),
+    m11 = as.numeric(raw[valid_rows, 13, drop = TRUE]),
+    m12 = as.numeric(raw[valid_rows, 14, drop = TRUE])
+  )
+}
+
+all_data <- bind_rows(lapply(sheet_names, parse_sheet))
+
+compute_season_corr <- function(df, season_cols) {
+  col_names <- paste0("m", season_cols)
+  df %>%
+    group_by(Year) %>%
+    mutate(across(all_of(col_names), ~ mean(.x, na.rm = TRUE), .names = "nat_{.col}")) %>%
+    ungroup() %>%
+    rowwise() %>%
+    mutate(
+      prov_vec = list(c_across(all_of(col_names))),
+      nat_vec  = list(c_across(starts_with("nat_m"))),
+      r        = cor(unlist(prov_vec), unlist(nat_vec), use = "complete.obs")
+    ) %>%
+    ungroup() %>%
+    select(Province, Year, r)
+}
+
+corr_mon    <- compute_season_corr(all_data, monsoon_months) %>% rename(Monsoon    = r)
+corr_nonmon <- compute_season_corr(all_data, nonmon_months)  %>% rename(NonMonsoon = r)
+
+corr_long <- left_join(corr_mon, corr_nonmon, by = c("Province", "Year")) %>%
+  pivot_longer(cols = c(Monsoon, NonMonsoon),
+               names_to  = "Season",
+               values_to = "Correlation") %>%
+  mutate(Season = factor(Season,
+                         levels = c("Monsoon", "NonMonsoon"),
+                         labels = c("Monsoon (May–Oct)", "Non-Monsoon (Nov–Apr)")))
+
+# Sort provinces by mean monsoon correlation (highest first)
+prov_order <- corr_mon %>%
+  group_by(Province) %>%
+  summarise(mean_r = mean(Monsoon, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(mean_r)) %>%
+  pull(Province)
+
+corr_long <- corr_long %>%
+  mutate(Province = factor(Province, levels = prov_order))
+
+p <- ggplot(corr_long, aes(x = Year, y = Correlation, colour = Season, linetype = Season)) +
+  geom_hline(yintercept = 0,   colour = "#cccccc", linewidth = 0.4, linetype = "dotted") +
+  geom_hline(yintercept = 0.7, colour = "#e8e8e8", linewidth = 0.3) +
+  geom_ribbon(
+    data = corr_long %>%
+      pivot_wider(names_from = Season, values_from = Correlation) %>%
+      rename(Mon = `Monsoon (May–Oct)`, Non = `Non-Monsoon (Nov–Apr)`),
+    aes(x = Year, ymin = pmin(Mon, Non), ymax = pmax(Mon, Non)),
+    inherit.aes = FALSE,
+    fill = "#aaaaaa", alpha = 0.15
+  ) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 1.2) +
+  scale_colour_manual(values = c("Monsoon (May–Oct)"      = "#2196F3",
+                                 "Non-Monsoon (Nov–Apr)"  = "#FF7043")) +
+  scale_linetype_manual(values = c("Monsoon (May–Oct)"     = "solid",
+                                   "Non-Monsoon (Nov–Apr)" = "dashed")) +
+  scale_x_continuous(breaks = c(2012, 2015, 2018, 2021),
+                     labels = c("'12", "'15", "'18", "'21")) +
+  scale_y_continuous(limits = c(-1, 1.05),
+                     breaks = c(-0.5, 0, 0.5, 1),
+                     labels = c("-0.5", "0", "0.5", "1")) +
+  facet_wrap(~ Province, ncol = 8) +
+  labs(
+    title    = "Provincial IndexP Correlation: Monsoon vs Non-Monsoon  |  2012–2021",
+    subtitle = "Spearman r between each province's seasonal monthly IndexP and the national seasonal mean.\nProvinces sorted by mean monsoon correlation (highest → top-left). Shaded area shows gap between seasons.",
+    x        = NULL,
+    y        = "Pearson r",
+    colour   = NULL,
+    linetype = NULL,
+    caption  = "Monsoon: May–Oct  |  Non-Monsoon: Nov–Apr"
+  ) +
+  theme_minimal(base_size = 8) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 13, hjust = 0.5),
+    plot.subtitle    = element_text(size = 8, colour = "grey45", hjust = 0.5,
+                                    margin = margin(b = 8)),
+    plot.caption     = element_text(size = 7, colour = "grey55", hjust = 0.5),
+    strip.text       = element_text(size = 6.5, face = "bold", colour = "#1a1a1a"),
+    axis.text        = element_text(size = 5.5, colour = "#555555"),
+    axis.title.y     = element_text(size = 7, margin = margin(r = 4)),
+    legend.position  = "top",
+    legend.text      = element_text(size = 9),
+    legend.key.width = unit(1.5, "cm"),
+    panel.grid.major = element_line(colour = "#f0f0f0", linewidth = 0.3),
+    panel.grid.minor = element_blank(),
+    panel.spacing    = unit(0.4, "lines")
+  )
+
+print(p)
+
+ggsave("monsoon_linegraph.png",
+       plot   = p,
+       width  = 28,
+       height = 32,
+       dpi    = 180,
+       bg     = "white")
+
+message("✔ Saved: monsoon_linegraph.png  in ", getwd())
+
