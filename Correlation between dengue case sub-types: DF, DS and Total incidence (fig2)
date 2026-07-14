@@ -1,0 +1,500 @@
+# =============================================================================
+# Thailand Regional Subgroup Analysis: Dengue–Humidity Correlations
+# Regions: North, Northeast, Central, South (Epidemiological classification)
+# Period: 2012–2021
+# =============================================================================
+
+# --- 0. WORKING DIRECTORY ----------------------------------------------------
+# Set this to the folder containing all five data files.
+# Option A – point explicitly to your data folder:
+#   setwd("C:/Users/YourName/Documents/DengueData")   # Windows
+#   setwd("~/Documents/DengueData")                    # Mac/Linux
+#
+# Option B – use the script's own location (recommended):
+#   In RStudio: Session > Set Working Directory > To Source File Location
+#   Or run this line (requires the 'rstudioapi' package):
+if (requireNamespace("rstudioapi", quietly = TRUE) &&
+    rstudioapi::isAvailable()) {
+  setwd(dirname(rstudioapi::getSourceEditorContext()$path))
+}
+cat("Working directory:", getwd(), "\n")
+
+# --- 1. PACKAGES -------------------------------------------------------------
+required_packages <- c(
+  "readxl", "dplyr", "tidyr", "ggplot2",
+  "FSA",       # Dunn post-hoc test
+  "rstatix",   # tidy Kruskal-Wallis
+  "scales",
+  "patchwork",
+  "knitr"
+)
+for (pkg in required_packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) install.packages(pkg, quiet = TRUE)
+  library(pkg, character.only = TRUE)
+}
+
+# --- 2. REGION MAPPING -------------------------------------------------------
+# Thailand Ministry of Public Health 4 macro-epidemiological regions.
+# Non-breaking spaces (\u00a0) in province names are handled by stringr below.
+
+region_map <- data.frame(
+  Province = c(
+    # NORTH (9)
+    "Chiang Mai","Chiang Rai","Kamphaeng Phet","Lampang","Lamphun",
+    "Mae Hong Son","Nan","Phayao","Phrae","Sukhothai","Tak","Uttaradit",
+    # NORTHEAST (20)
+    "Amnat Charoen","Bueng Kan","Buri Ram","Chaiyaphum",
+    "Kalasin","Khon Kaen","Loei","Maha Sarakham",
+    "Mukdahan","Nakhon Phanom","Nakhon Ratchasima",
+    "Nong Bua Lam Phu","Nong Khai","Roi Et",
+    "Sakon Nakhon","Si Sa Ket","Surin",
+    "Ubon Ratchathani","Udon Thani","Yasothon",
+    # CENTRAL (25)
+    "Ang Thong","Bangkok","Chachoengsao","Chai Nat",
+    "Chanthaburi","Chon Buri","Kanchanaburi","Lop Buri",
+    "Nakhon Nayok","Nakhon Pathom","Nakhon Sawan",
+    "Nonthaburi","Pathum Thani","Phetchabun",
+    "Phetchaburi","Phichit","Phitsanulok",
+    "Phra Nakhon Si Ayutthaya","Prachin Buri",
+    "Prachuap Khiri Khan","Ratchaburi","Rayong",
+    "Sa Kaeo","Samut Prakan","Samut Sakhon",
+    "Samut Songkhram","Saraburi","Sing Buri",
+    "Suphan Buri","Trat","Uthai Thani",
+    # SOUTH (14)
+    "Chumphon","Krabi","Nakhon Si Thammarat","Narathiwat",
+    "Pattani","Phangnga","Phatthalung","Phuket",
+    "Ranong","Satun","Songkhla","Surat Thani",
+    "Trang","Yala"
+  ),
+  Region = c(
+    rep("North",     12),
+    rep("Northeast", 20),
+    rep("Central",   31),
+    rep("South",     14)
+  ),
+  stringsAsFactors = FALSE
+)
+
+region_levels <- c("North","Northeast","Central","South")
+region_map$Region <- factor(region_map$Region, levels = region_levels)
+
+cat("Province count per region in mapping:\n")
+print(table(region_map$Region))
+
+# Helper: strip non-breaking spaces from province names
+clean_province <- function(x) gsub("\u00a0", " ", trimws(x))
+
+# --- 3. LOAD & JOIN OVERALL CORRELATIONS ------------------------------------
+
+corr_raw <- read_excel("/Users/megantimms/Desktop/Publications/Provincial-correlations-combined(2012-2021).xlsx") %>%
+  mutate(Province = clean_province(Province)) %>%
+  select(Province, DF_DS, DS_Total, DF_Total)
+
+corr_df <- corr_raw %>%
+  left_join(region_map, by = "Province")
+
+unmatched <- corr_df %>% filter(is.na(Region)) %>% pull(Province)
+if (length(unmatched) > 0) {
+  cat("\n** Unmatched provinces (check spelling):\n")
+  print(unmatched)
+} else {
+  cat("\nAll", nrow(corr_df), "provinces matched to a region.\n")
+}
+
+corr_ok <- corr_df %>% filter(!is.na(Region))
+
+# --- 4. LOAD ANNUAL INDEX DATA -----------------------------------------------
+
+read_index_sheet <- function(sheet) {
+  raw <- read_excel("IndexP_monthlydata.xlsx", sheet = sheet, col_names = FALSE)
+  year_val <- suppressWarnings(as.integer(as.character(raw[[1, 1]])))
+  df <- raw[-1, ]
+  colnames(df) <- c("row_num","Province", paste0("M", 1:12))
+  df %>%
+    select(Province, starts_with("M")) %>%
+    filter(!is.na(Province), Province != "Province") %>%
+    mutate(Province = clean_province(as.character(Province)),
+           across(starts_with("M"), as.numeric)) %>%
+    rowwise() %>%
+    mutate(annual_mean = mean(c_across(starts_with("M")), na.rm = TRUE)) %>%
+    ungroup() %>%
+    mutate(Year = year_val)
+}
+
+index_long <- bind_rows(lapply(excel_sheets("IndexP_monthlydata.xlsx"),
+                               read_index_sheet)) %>%
+  left_join(region_map, by = "Province")
+
+# --- 5. REGIONAL SUMMARY STATISTICS -----------------------------------------
+
+regional_summary <- corr_ok %>%
+  group_by(Region) %>%
+  summarise(
+    n_provinces     = n(),
+    med_DF_DS       = round(median(DF_DS,    na.rm=TRUE), 4),
+    IQR_DF_DS       = round(IQR(DF_DS,       na.rm=TRUE), 4),
+    med_DS_Total    = round(median(DS_Total,  na.rm=TRUE), 4),
+    IQR_DS_Total    = round(IQR(DS_Total,     na.rm=TRUE), 4),
+    med_DF_Total    = round(median(DF_Total,  na.rm=TRUE), 4),
+    IQR_DF_Total    = round(IQR(DF_Total,     na.rm=TRUE), 4),
+    .groups = "drop"
+  )
+
+cat("\n\n====== REGIONAL MEDIAN CORRELATIONS (2012–2021 combined) ======\n")
+print(knitr::kable(regional_summary, format = "simple"))
+
+write.csv(regional_summary, "Regional_Summary_Statistics.csv", row.names = FALSE)
+
+# --- 6. KRUSKAL-WALLIS + DUNN POST-HOC --------------------------------------
+
+run_tests <- function(col, label) {
+  cat(sprintf("\n\n--- Kruskal-Wallis: %s ---\n", label))
+  kw <- kruskal.test(reformulate("Region", col), data = corr_ok)
+  print(kw)
+  cat(sprintf("\n--- Dunn Post-Hoc (BH): %s ---\n", label))
+  dunn <- dunnTest(corr_ok[[col]], corr_ok$Region, method = "bh")
+  print(dunn)
+  invisible(list(kw=kw, dunn=dunn))
+}
+
+cat("\n\n====== STATISTICAL TESTS ======\n")
+res_DF_DS  <- run_tests("DF_DS",    "DF vs DS")
+res_DS_Tot <- run_tests("DS_Total", "DS vs Total Dengue")
+res_DF_Tot <- run_tests("DF_Total", "DF vs Total Dengue")
+
+# --- 7. ANNUAL REGIONAL MEDIANS ----------------------------------------------
+
+annual_reg <- index_long %>%
+  filter(!is.na(Region)) %>%
+  group_by(Year, Region) %>%
+  summarise(
+    median_index = median(annual_mean, na.rm=TRUE),
+    IQR_index    = IQR(annual_mean,   na.rm=TRUE),
+    n            = n(),
+    .groups = "drop"
+  )
+
+write.csv(annual_reg, "Annual_Regional_Index.csv", row.names = FALSE)
+
+cat("\n\n====== ANNUAL REGIONAL MEDIAN HUMIDITY INDEX ======\n")
+print(knitr::kable(annual_reg, format = "simple"))
+
+# --- 8. PUBLICATION-QUALITY PLOTS -------------------------------------------
+# Design standards:
+#   - Colourblind-safe palette (Wong 2011, Nature Methods)
+#   - Base font size 11 pt (fits single-column journal width ~88 mm)
+#   - All text in serif (Times-compatible) via windowsFonts() fallback
+#   - White background, full axis box, no minor gridlines
+#   - 600 dpi TIFF output (standard for most journals)
+#   - Figure panels labelled A/B/C with patchwork
+#   - Axis titles use proper unicode (Spearman r, ±, ×)
+# -------------------------------------------------------------------------
+
+# Colourblind-safe palette (Wong 2011)
+region_colours <- c(
+  "North"     = "#0072B2",   # blue
+  "Northeast" = "#E69F00",   # orange
+  "Central"   = "#009E73",   # green
+  "South"     = "#D55E00"    # vermillion
+)
+region_shapes <- c("North" = 21, "Northeast" = 22,
+                   "Central" = 23, "South" = 24)
+
+# Publication base theme
+theme_pub <- function(base_size = 11) {
+  theme_classic(base_size = base_size) +
+    theme(
+      # Axes
+      axis.line        = element_line(colour = "black", linewidth = 0.4),
+      axis.ticks       = element_line(colour = "black", linewidth = 0.4),
+      axis.ticks.length = unit(2.5, "pt"),
+      axis.text        = element_text(colour = "black", size = base_size - 1),
+      axis.title       = element_text(colour = "black", size = base_size,
+                                      face = "plain"),
+      # Panel
+      panel.border     = element_rect(colour = "black", fill = NA,
+                                      linewidth = 0.5),
+      panel.background = element_rect(fill = "white"),
+      panel.grid.major = element_line(colour = "grey92", linewidth = 0.3),
+      panel.grid.minor = element_blank(),
+      # Legend
+      legend.title     = element_text(size = base_size - 1, face = "bold"),
+      legend.text      = element_text(size = base_size - 2),
+      legend.key.size  = unit(10, "pt"),
+      legend.background = element_rect(fill = "white", colour = NA),
+      legend.key       = element_rect(fill = "white", colour = NA),
+      # Strip (facets)
+      strip.background = element_rect(fill = "grey95", colour = "black",
+                                      linewidth = 0.4),
+      strip.text       = element_text(face = "bold", size = base_size - 1),
+      # Titles removed at panel level; added via patchwork tags
+      plot.title       = element_blank(),
+      plot.subtitle    = element_blank(),
+      plot.margin      = margin(4, 6, 4, 6, "pt")
+    )
+}
+
+# ── FIGURE 1: Three-panel box + jitter (one per correlation type) ─────────
+#    Panel A: DF vs DS   B: DS vs Total   C: DF vs Total
+#
+#    Layout fixes for readability:
+#      - Double-column width (180 mm) so x-axis labels have room to breathe
+#      - Short, consistent y-axis title shared across all panels via a single
+#        left-side label (using patchwork plot_annotation + theme tricks)
+#      - Panel subtitle (bold) names the comparison inside each panel
+#      - Generous plot margins and increased base font size (12 pt)
+#      - x-axis region labels angled 30° to prevent overlap
+#      - KW p-value placed inside upper-left corner (avoids right-side crowding)
+
+make_box_pub <- function(data, y, panel_title) {
+  
+  # Kruskal-Wallis p annotation
+  kw_p    <- kruskal.test(reformulate("Region", y), data = data)$p.value
+  p_label <- ifelse(kw_p < 0.001,
+                    "italic(P) < 0.001",
+                    sprintf("italic(P) == %.3f", kw_p))
+  
+  ggplot(data, aes(x = Region, y = .data[[y]])) +
+    # Raw jittered points (behind box)
+    geom_jitter(aes(fill = Region), shape = 21, colour = "white",
+                width = 0.16, size = 2.2, alpha = 0.65, stroke = 0.35) +
+    # Boxplot (no outlier symbols — raw data already shown)
+    geom_boxplot(aes(fill = Region), colour = "black",
+                 outlier.shape = NA, alpha = 0.40,
+                 width = 0.42, linewidth = 0.45,
+                 staplewidth = 0.25) +
+    # Median diamond overlay
+    stat_summary(fun = median, geom = "point",
+                 shape = 18, size = 4, colour = "black") +
+    # KW p-value — upper LEFT, inside panel
+    annotate("text", x = -Inf, y = Inf,
+             label = p_label, parse = TRUE,
+             hjust = -0.1, vjust = 1.6,
+             size = 3.4, colour = "grey25", fontface = "italic") +
+    scale_fill_manual(values = region_colours, guide = "none") +
+    # Shared y-axis: short label, consistent breaks
+    scale_y_continuous(
+      name   = "Spearman r",
+      limits = c(0.15, 1.08),
+      breaks = seq(0.2, 1.0, by = 0.2),
+      labels = number_format(accuracy = 0.1),
+      expand = expansion(mult = c(0.02, 0.04))
+    ) +
+    scale_x_discrete(name = NULL) +
+    # Panel title rendered as plot.title (re-enabled for Fig 1 only)
+    ggtitle(panel_title) +
+    theme_pub(base_size = 12) +
+    theme(
+      plot.title   = element_text(face = "bold", size = 11,
+                                  hjust = 0.5,
+                                  margin = margin(b = 4)),
+      # Angle x labels so "Northeast" doesn't collide with "Central"
+      axis.text.x  = element_text(angle = 30, hjust = 1, vjust = 1,
+                                  size = 11),
+      axis.title.y = element_text(size = 11),
+      plot.margin  = margin(t = 8, r = 10, b = 6, l = 10, unit = "pt")
+    )
+}
+
+pA <- make_box_pub(corr_ok, "DF_DS",
+                   "(A)  Dengue Fever (DF) vs Dengue Syndrome (DS)")
+pB <- make_box_pub(corr_ok, "DS_Total",
+                   "(B)  DS vs Total Dengue Incidence")
+pC <- make_box_pub(corr_ok, "DF_Total",
+                   "(C)  DF vs Total Dengue Incidence")
+
+fig1 <- (pA / pB / pC) +
+  plot_annotation(
+    caption = paste0(
+      "Box: interquartile range; centre line: median; filled diamond: median overlay; ",
+      "circles: individual provinces (n=77).\n",
+      "Kruskal\u2013Wallis H-test p-values shown in upper left of each panel."
+    )
+  ) &
+  theme(
+    plot.caption    = element_text(size = 8, colour = "grey40",
+                                   hjust = 0, margin = margin(t = 8)),
+    plot.background = element_rect(fill = "white", colour = NA)
+  )
+
+print(fig1)
+
+# Double-column width (180 mm), taller to give each panel room
+ggsave("Figure1_Regional_Boxplots.tiff", fig1,
+       width = 180, height = 240, units = "mm", dpi = 600,
+       compression = "lzw")
+ggsave("Figure1_Regional_Boxplots.pdf",  fig1,
+       width = 180, height = 240, units = "mm")
+cat("\nFigure 1 saved (TIFF 180×240 mm + PDF)\n")
+
+# ── FIGURE 2: Annual line plot with IQR ribbon ────────────────────────────
+
+fig2 <- ggplot(annual_reg,
+               aes(x = Year, y = median_index,
+                   colour = Region, fill = Region,
+                   group = Region, shape = Region)) +
+  geom_ribbon(aes(ymin = median_index - IQR_index / 2,
+                  ymax = median_index + IQR_index / 2),
+              alpha = 0.12, colour = NA) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2.8, colour = "black", stroke = 0.5) +
+  scale_colour_manual(values = region_colours, name = "Region") +
+  scale_fill_manual(values   = region_colours, name = "Region") +
+  scale_shape_manual(values  = region_shapes,  name = "Region") +
+  scale_x_continuous(
+    name   = "Year",
+    breaks = 2012:2021,
+    expand = expansion(mult = 0.03)
+  ) +
+  scale_y_continuous(
+    name   = "Median annual humidity index (provincial)",
+    labels = number_format(accuracy = 0.001)
+  ) +
+  labs(
+    caption = paste0(
+      "Points: median humidity index across provinces within each region per year.\n",
+      "Shaded band: \u00b1\u00bd interquartile range. Shapes differ by region for ",
+      "black-and-white reproducibility."
+    )
+  ) +
+  theme_pub() +
+  theme(
+    legend.position  = c(0.12, 0.18),
+    legend.box.background = element_rect(colour = "grey70", linewidth = 0.3),
+    plot.caption     = element_text(size = 7.5, colour = "grey40", hjust = 0),
+    plot.background  = element_rect(fill = "white", colour = NA)
+  )
+
+print(fig2)
+
+ggsave("Figure2_Annual_Regional_Index.tiff", fig2,
+       width = 140, height = 80, units = "mm", dpi = 600,
+       compression = "lzw")
+ggsave("Figure2_Annual_Regional_Index.pdf",  fig2,
+       width = 140, height = 80, units = "mm")
+cat("Figure 2 saved (TIFF + PDF)\n")
+
+# ── FIGURE 3: Heatmap (region × year) ─────────────────────────────────────
+
+heat <- annual_reg %>%
+  mutate(Year   = factor(Year),
+         Region = factor(Region, levels = rev(region_levels)))
+
+# Determine text colour based on fill value (dark text on light tiles)
+heat_mid <- median(heat$median_index, na.rm = TRUE)
+
+fig3 <- ggplot(heat, aes(x = Year, y = Region, fill = median_index)) +
+  geom_tile(colour = "white", linewidth = 0.7) +
+  geom_text(aes(
+    label  = sprintf("%.3f", median_index),
+    colour = median_index > heat_mid
+  ), size = 2.9, fontface = "plain", show.legend = FALSE) +
+  scale_colour_manual(values = c("TRUE" = "grey15", "FALSE" = "grey90")) +
+  scale_fill_distiller(
+    palette  = "YlOrRd",
+    direction = 1,
+    name     = "Median\nhumidity\nindex",
+    limits   = c(floor(min(heat$median_index, na.rm=TRUE)*100)/100, NA),
+    labels   = number_format(accuracy = 0.001)
+  ) +
+  scale_x_discrete(name = "Year", expand = c(0, 0)) +
+  scale_y_discrete(name = NULL,   expand = c(0, 0)) +
+  labs(
+    caption = paste0(
+      "Values: median humidity index across provinces per region per year.\n"
+    )
+  ) +
+  theme_pub(base_size = 10) +
+  theme(
+    axis.line        = element_blank(),
+    axis.ticks       = element_blank(),
+    panel.border     = element_rect(colour = "black", linewidth = 0.5),
+    panel.grid.major = element_blank(),
+    legend.position  = "right",
+    plot.caption     = element_text(size = 7.5, colour = "grey40", hjust = 0),
+    plot.background  = element_rect(fill = "white", colour = NA)
+  )
+
+print(fig3)
+
+ggsave("Figure3_Heatmap_Region_Year.tiff", fig3,
+       width = 140, height = 60, units = "mm", dpi = 600,
+       compression = "lzw")
+ggsave("Figure3_Heatmap_Region_Year.pdf",  fig3,
+       width = 140, height = 60, units = "mm")
+cat("Figure 3 saved (TIFF + PDF)\n")
+
+# ── FIGURE 4: Half-violin + box + jitter (DF_Total) ──────────────────────
+# Uses ggdist for the half-violin (rain cloud plot style)
+
+if (!requireNamespace("ggdist", quietly = TRUE))
+  install.packages("ggdist", quiet = TRUE)
+library(ggdist)
+
+fig4 <- ggplot(corr_ok,
+               aes(x = Region, y = DF_Total,
+                   fill = Region, colour = Region)) +
+  # Half-violin on right
+  stat_halfeye(
+    aes(fill = Region),
+    adjust      = 0.8,
+    width       = 0.55,
+    justification = -0.22,
+    point_colour = NA,
+    alpha       = 0.45,
+    .width      = 0,
+    colour      = NA
+  ) +
+  # Box in centre
+  geom_boxplot(
+    colour   = "black",
+    fill     = "white",
+    width    = 0.18,
+    outlier.shape = NA,
+    linewidth = 0.45,
+    staplewidth = 0.25
+  ) +
+  # Raw points on left
+  geom_jitter(shape = 21, colour = "white", stroke = 0.35,
+              width = 0.08, size = 1.8, alpha = 0.7) +
+  scale_fill_manual(values   = region_colours, guide = "none") +
+  scale_colour_manual(values = region_colours, guide = "none") +
+  scale_y_continuous(
+    name   = "Spearman r (DF vs total dengue incidence)",
+    breaks = seq(0.2, 1.0, 0.2),
+    labels = number_format(accuracy = 0.1),
+    limits = c(NA, 1.1)
+  ) +
+  scale_x_discrete(name = NULL) +
+  labs(
+    caption = paste0(
+      "Raincloud plot: half-violin (kernel density, right) + box (IQR, centre) + ",
+      "jittered raw data (left).\n",
+      "Each point represents one province (n\u202f=\u202f77). ",
+      "Box whiskers extend to 1.5\u00d7IQR."
+    )
+  ) +
+  coord_flip() +
+  theme_pub() +
+  theme(
+    plot.caption    = element_text(size = 7.5, colour = "grey40", hjust = 0),
+    plot.background = element_rect(fill = "white", colour = NA)
+  )
+
+print(fig4)
+
+ggsave("Figure4_Raincloud_DF_Total.tiff", fig4,
+       width = 130, height = 90, units = "mm", dpi = 600,
+       compression = "lzw")
+ggsave("Figure4_Raincloud_DF_Total.pdf",  fig4,
+       width = 130, height = 90, units = "mm")
+cat("Figure 4 saved (TIFF + PDF)\n")
+
+cat("\n\n====== ANALYSIS COMPLETE ======\n")
+cat("Outputs (TIFF 600 dpi + vector PDF):\n")
+cat("  Figure1_Regional_Boxplots.tiff / .pdf\n")
+cat("  Figure2_Annual_Regional_Index.tiff / .pdf\n")
+cat("  Figure3_Heatmap_Region_Year.tiff / .pdf\n")
+cat("  Figure4_Raincloud_DF_Total.tiff / .pdf\n")
+cat("  Regional_Summary_Statistics.csv\n")
+cat("  Annual_Regional_Index.csv\n")
