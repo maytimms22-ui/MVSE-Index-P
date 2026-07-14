@@ -1,0 +1,379 @@
+install.packages("readxl")
+install.packages("dplyr")
+install.packages("tidyr")
+install.packages("stingr")
+
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+
+dengue_cases <- read_excel("~/desktop/publications/dengue_case_2012-2021-all_inclusive.xlsx",
+                           sheet = 1) %>%
+  
+  rename(PROVINCE = province,
+         YEAR = year,
+         MONTH = month,
+         DF = DF,
+         DS = DS,
+         TOTAL = Total) %>%
+  mutate(
+    PROVINCE = str_trim(PROVINCE),
+    YEAR = as.integer(YEAR),
+    MONTH = as.integer(MONTH)
+  )
+
+p_index <- read_excel("~/desktop/publications/IndexP_monthly_all-inclusive.xlsx",
+                      sheet = 1) %>%
+  rename(INDEXP = 'INDEX-P') %>%
+  mutate(
+    PROVINCE = str_trim(PROVINCE),
+    YEAR = as.integer(YEAR),
+    MONTH = as.integer(MONTH)
+  )
+
+dat_monthly <- dengue_cases %>%
+  inner_join(p_index, by = c("PROVINCE", "YEAR", "MONTH"))
+
+dat_yearly <- dat_monthly %>%
+  group_by(PROVINCE, YEAR) %>%
+  summarise(
+    DF_year = sum(DF, na.rm = TRUE),
+    DS_year = sum(DS, na.rm = TRUE),
+    TOTAL_year = sum(TOTAL, na.rm = TRUE),
+    INDEXP_mean = mean(INDEXP, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+calc_cor <- function(data, dengue_var = "DF_year") {
+  data %>%
+    group_by(PROVINCE) %>%
+    summarise(
+      col_val = if (n() >= 3 && sd(.data[[dengue_var]]) > 0 && sd (INDEXP_mean) > 0)
+        cor(.data[[dengue_var]], INDEXP_mean, use = "pairwise.complete.pbs")
+      else NA_real_,
+      .groups = "drop"
+    )
+}
+library(dplyr)
+
+# Assuming you already have: data_monthly
+# with columns: PROVINCE, YEAR, MONTH, DF, DS, Total, p_index
+
+dat_monthly <- dat_monthly %>%
+  mutate(
+    DF     = as.numeric(DF),
+    DS     = as.numeric(DS),
+    TOTAL  = as.numeric(TOTAL),
+    p_index = as.numeric(p_index)
+  )
+
+library(readxl)
+library(dplyr)
+
+cases <- read_excel("~/desktop/publications/dengue_case_2012-2021-all_inclusive.xlsx")
+pidx  <- read_excel("~/desktop/publications/IndexP_monthly_all-inclusive.xlsx")
+
+# Standardise names
+cases <- cases %>%
+  rename_with(tolower)    # province, year, month, df, ds, total
+
+pidx <- pidx %>%
+  rename(
+    province = PROVINCE,
+    year     = YEAR,
+    month    = `MONTH`,
+    p_index  = `INDEX-P`
+  )
+
+# Clean merge (this object should be flat, no list columns)
+data_monthly <- cases %>%
+  mutate(
+    province = as.character(province),
+    year     = as.integer(year),
+    month    = as.integer(month)
+  ) %>%
+  left_join(
+    pidx %>%
+      mutate(
+        province = as.character(province),
+        year     = as.integer(year),
+        month    = as.integer(month),
+        p_index  = as.numeric(p_index)
+      ),
+    by = c("province","year","month")
+  ) %>%
+  mutate(
+    df     = as.numeric(df),
+    ds     = as.numeric(ds),
+    total  = as.numeric(total)
+  )
+
+str(data_monthly)
+
+safe_cor <- function(x, y) {
+  ok <- is.finite(x) & is.finite(y)
+  x <- x[ok]; y <- y[ok]
+  if (length(x) < 2) return(NA_real_)
+  stats::cor(x, y, method = "pearson")
+}
+
+library(tidyr)
+library(purrr)
+
+cor_prov_year <- data_monthly %>%
+  group_by(province, year) %>%
+  nest() %>%
+  mutate(
+    cor_df    = map_dbl(data, ~ safe_cor(.x$df,    .x$p_index)),
+    cor_ds    = map_dbl(data, ~ safe_cor(.x$ds,    .x$p_index)),
+    cor_total = map_dbl(data, ~ safe_cor(.x$total, .x$p_index))
+  ) %>%
+  select(-data) %>%
+  ungroup()
+
+sapply(data_monthly, class)
+
+library(sf)
+
+thailand_provinces <- st_read("~/Downloads/gadm41_THA_shp/gadm41_THA_1.shp")
+thailand_provinces <- thailand_provinces %>%
+  rename(province = NAME_1) %>%
+  mutate(province = as.character(province))
+
+map_data <- thailand_provinces %>%
+  left_join(cor_prov_year, by = "province")
+
+library(dplyr)
+library(tidyr)
+
+map_long <- map_data %>%
+  pivot_longer(
+    cols = c(cor_df, cor_ds, cor_total),
+    names_to  = "type",
+    values_to = "correlation"
+  ) %>%
+  mutate(
+    type = factor(
+      type,
+      levels = c("cor_df","cor_ds","cor_total"),
+      labels = c("DF vs P-index","DS vs P-index","Total vs P-index")
+    )
+  )
+
+library(ggplot2)
+
+years_to_plot <- sort(unique(map_long$year))  # likely 2012:2021
+
+for (y in years_to_plot) {
+  g <- ggplot(filter(map_long, year == y)) +
+    geom_sf(aes(fill = correlation), color = "grey40", size = 0.1) +
+    scale_fill_gradient2(
+      name   = "Correlation",
+      limits = c(-1, 1),
+      low    = "blue",
+      mid    = "white",
+      high   = "red",
+      na.value = "lightgrey"
+    ) +
+    facet_wrap(~ type, nrow = 1) +
+    labs(
+      title = paste("Yearly correlation between dengue cases and P-index:", y),
+      subtitle = "Panels: DF, DS and Total dengue vs P-index"
+    ) +
+    theme_minimal()
+  
+  ggsave(
+    filename = paste0("dengue_Pindex_corr_map_", y, ".png"),
+    plot = g,
+    width = 10, height = 4, dpi = 300
+  )
+}
+
+dim(map_long)
+table(map_long$year)
+table(map_long$type)
+summary(map_long$correlation)
+
+library(ggplot2)
+
+y <- 2015  # choose any year you know exists
+g <- ggplot(dplyr::filter(map_long, year == y)) +
+  geom_sf(aes(fill = correlation), color = "grey40", size = 0.1) +
+  scale_fill_gradient2(
+    name   = "Correlation",
+    limits = c(-1, 1),
+    low    = "blue",
+    mid    = "white",
+    high   = "red",
+    na.value = "lightgrey"
+  ) +
+  facet_wrap(~ type, nrow = 1) +
+  labs(
+    title = paste("Yearly correlation between dengue cases and P-index:", y),
+    subtitle = "DF, DS and Total dengue vs P-index"
+  ) +
+  theme_minimal()
+
+g   # <- this should display a map in RStudio
+
+y <- 2013  # choose any year you know exists
+g <- ggplot(dplyr::filter(map_long, year == y)) +
+  geom_sf(aes(fill = correlation), color = "grey40", size = 0.1) +
+  scale_fill_gradient2(
+    name   = "Correlation",
+    limits = c(-1, 1),
+    low    = "blue",
+    mid    = "white",
+    high   = "red",
+    na.value = "lightgrey"
+  ) +
+  facet_wrap(~ type, nrow = 1) +
+  labs(
+    title = paste("Yearly correlation between dengue cases and P-index:", y),
+    subtitle = "DF, DS and Total dengue vs P-index"
+  ) +
+  theme_minimal()
+
+g   # <- this should display a map in RStudio
+
+y <- 2014  # choose any year you know exists
+g <- ggplot(dplyr::filter(map_long, year == y)) +
+  geom_sf(aes(fill = correlation), color = "grey40", size = 0.1) +
+  scale_fill_gradient2(
+    name   = "Correlation",
+    limits = c(-1, 1),
+    low    = "blue",
+    mid    = "white",
+    high   = "red",
+    na.value = "lightgrey"
+  ) +
+  facet_wrap(~ type, nrow = 1) +
+  labs(
+    title = paste("Yearly correlation between dengue cases and P-index:", y),
+    subtitle = "DF, DS and Total dengue vs P-index"
+  ) +
+  theme_minimal()
+
+g   # <- this should display a map in RStudio
+
+y <- 2016  # choose any year you know exists
+g <- ggplot(dplyr::filter(map_long, year == y)) +
+  geom_sf(aes(fill = correlation), color = "grey40", size = 0.1) +
+  scale_fill_gradient2(
+    name   = "Correlation",
+    limits = c(-1, 1),
+    low    = "blue",
+    mid    = "white",
+    high   = "red",
+    na.value = "lightgrey"
+  ) +
+  facet_wrap(~ type, nrow = 1) +
+  labs(
+    title = paste("Yearly correlation between dengue cases and P-index:", y),
+    subtitle = "DF, DS and Total dengue vs P-index"
+  ) +
+  theme_minimal()
+
+g   # <- this should display a map in RStudio
+
+y <- 2017  # choose any year you know exists
+g <- ggplot(dplyr::filter(map_long, year == y)) +
+  geom_sf(aes(fill = correlation), color = "grey40", size = 0.1) +
+  scale_fill_gradient2(
+    name   = "Correlation",
+    limits = c(-1, 1),
+    low    = "blue",
+    mid    = "white",
+    high   = "red",
+    na.value = "lightgrey"
+  ) +
+  facet_wrap(~ type, nrow = 1) +
+  labs(
+    title = paste("Yearly correlation between dengue cases and P-index:", y),
+    subtitle = "DF, DS and Total dengue vs P-index"
+  ) +
+  theme_minimal()
+
+g   # <- this should display a map in RStudio
+
+y <- 2018  # choose any year you know exists
+g <- ggplot(dplyr::filter(map_long, year == y)) +
+  geom_sf(aes(fill = correlation), color = "grey40", size = 0.1) +
+  scale_fill_gradient2(
+    name   = "Correlation",
+    limits = c(-1, 1),
+    low    = "blue",
+    mid    = "white",
+    high   = "red",
+    na.value = "lightgrey"
+  ) +
+  facet_wrap(~ type, nrow = 1) +
+  labs(
+    title = paste("Yearly correlation between dengue cases and P-index:", y),
+    subtitle = "DF, DS and Total dengue vs P-index"
+  ) +
+  theme_minimal()
+
+g   # <- this should display a map in RStudio
+
+y <- 2019  # choose any year you know exists
+g <- ggplot(dplyr::filter(map_long, year == y)) +
+  geom_sf(aes(fill = correlation), color = "grey40", size = 0.1) +
+  scale_fill_gradient2(
+    name   = "Correlation",
+    limits = c(-1, 1),
+    low    = "blue",
+    mid    = "white",
+    high   = "red",
+    na.value = "lightgrey"
+  ) +
+  facet_wrap(~ type, nrow = 1) +
+  labs(
+    title = paste("Yearly correlation between dengue cases and P-index:", y),
+    subtitle = "DF, DS and Total dengue vs P-index"
+  ) +
+  theme_minimal()
+
+g   # <- this should display a map in RStudio
+
+y <- 2020  # choose any year you know exists
+g <- ggplot(dplyr::filter(map_long, year == y)) +
+  geom_sf(aes(fill = correlation), color = "grey40", size = 0.1) +
+  scale_fill_gradient2(
+    name   = "Correlation",
+    limits = c(-1, 1),
+    low    = "blue",
+    mid    = "white",
+    high   = "red",
+    na.value = "lightgrey"
+  ) +
+  facet_wrap(~ type, nrow = 1) +
+  labs(
+    title = paste("Yearly correlation between dengue cases and P-index:", y),
+    subtitle = "DF, DS and Total dengue vs P-index"
+  ) +
+  theme_minimal()
+
+g   # <- this should display a map in RStudio
+
+y <- 2021  # choose any year you know exists
+g <- ggplot(dplyr::filter(map_long, year == y)) +
+  geom_sf(aes(fill = correlation), color = "grey40", size = 0.1) +
+  scale_fill_gradient2(
+    name   = "Correlation",
+    limits = c(-1, 1),
+    low    = "blue",
+    mid    = "white",
+    high   = "red",
+    na.value = "lightgrey"
+  ) +
+  facet_wrap(~ type, nrow = 1) +
+  labs(
+    title = paste("Yearly correlation between dengue cases and P-index:", y),
+    subtitle = "DF, DS and Total dengue vs P-index"
+  ) +
+  theme_minimal()
+
+g   # <- this should display a map in RStudio
+
