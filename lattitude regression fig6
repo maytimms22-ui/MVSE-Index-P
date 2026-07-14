@@ -1,0 +1,318 @@
+# =============================================================================
+#  Latitude Regression: P-Index Median Correlation vs. Province Latitude
+#  Publication-quality figure for peer-reviewed manuscript
+#  Provinces: n = 77  |  Period: 2012–2021
+# =============================================================================
+
+# ── 0. Packages ───────────────────────────────────────────────────────────────
+pkgs <- c("readxl", "dplyr", "ggplot2", "ggrepel", "broom", "tidyr",
+          "scales", "patchwork")
+invisible(lapply(pkgs, function(p) {
+  if (!requireNamespace(p, quietly = TRUE)) install.packages(p)
+  library(p, character.only = TRUE)
+}))
+
+# ── 1. Load correlation data ───────────────────────────────────────────────────
+corr_file <- "Provincial-correlations-combined_2012-2021_.xlsx"  # adjust if needed
+corr_file <- file.choose()
+
+corr <- read_excel(corr_file, sheet = "Sheet1") |>
+  mutate(Province = trimws(gsub("\u00a0", " ", Province)),   # fix non-breaking spaces
+         Province = recode(Province,
+                           "Bangkok Metropolis" = "Bangkok",
+                           "Krung Thep Maha Nakhon" = "Bangkok")) |>
+  mutate(mean_corr = rowMeans(across(c(DF_DS, DS_Total, DF_Total)), na.rm = TRUE))
+
+# ── 2. Province latitude lookup ────────────────────────────────────────────────
+lat_lookup <- tibble(
+  Province = c(
+    "Amnat Charoen","Ang Thong","Bangkok","Bueng Kan","Buri Ram",
+    "Chachoengsao","Chai Nat","Chaiyaphum","Chanthaburi","Chiang Mai",
+    "Chiang Rai","Chon Buri","Chumphon","Kalasin","Kamphaeng Phet",
+    "Kanchanaburi","Khon Kaen","Krabi","Lampang","Lamphun",
+    "Loei","Lop Buri","Mae Hong Son","Maha Sarakham","Mukdahan",
+    "Nakhon Nayok","Nakhon Pathom","Nakhon Phanom","Nakhon Ratchasima","Nakhon Sawan",
+    "Nakhon Si Thammarat","Nan","Narathiwat","Nong Bua Lam Phu","Nong Khai",
+    "Nonthaburi","Pathum Thani","Pattani","Phangnga","Phatthalung",
+    "Phayao","Phetchabun","Phetchaburi","Phichit","Phitsanulok",
+    "Phra Nakhon Si Ayutthaya","Phrae","Phuket","Prachin Buri","Prachuap Khiri Khan",
+    "Ranong","Ratchaburi","Rayong","Roi Et","Sa Kaeo",
+    "Sakon Nakhon","Samut Prakan","Samut Sakhon","Samut Songkhram","Saraburi",
+    "Satun","Si Sa Ket","Sing Buri","Songkhla","Sukhothai",
+    "Suphan Buri","Surat Thani","Surin","Tak","Trang",
+    "Trat","Ubon Ratchathani","Udon Thani","Uthai Thani","Uttaradit",
+    "Yala","Yasothon"
+  ),
+  latitude = c(
+    15.87,14.59,13.75,18.36,14.99,13.69,15.19,15.81,12.61,18.79,
+    19.91,13.36,10.49,16.43,16.48,14.02,16.43, 8.09,18.29,18.57,
+    17.49,14.80,19.30,16.01,16.54,14.20,13.82,17.39,14.97,15.70,
+    8.43,18.78, 6.43,17.20,17.88,13.86,14.02, 6.87, 8.45, 7.62,
+    19.15,16.42,13.11,16.44,16.82,14.35,18.15, 7.89,14.05,11.81,
+    9.96,13.53,12.68,16.06,13.82,17.17,13.60,13.55,13.41,14.53,
+    6.62,15.11,14.89, 7.19,17.01,14.47, 9.14,14.88,16.88, 7.56,
+    12.24,15.25,17.41,15.38,17.62, 6.54,15.79
+  )
+)
+
+# ── 3. Merge & flag regions ────────────────────────────────────────────────────
+df <- corr |>
+  left_join(lat_lookup, by = "Province") |>
+  filter(!is.na(latitude)) |>
+  mutate(region = if_else(latitude >= 12, "North / Central / NE", "Southern peninsula"))
+
+missing <- setdiff(corr$Province, lat_lookup$Province)
+if (length(missing) > 0)
+  message("Provinces with no latitude match (check spelling): ", paste(missing, collapse = ", "))
+
+# ── 4. OLS regression ──────────────────────────────────────────────────────────
+fit <- lm(DF_Total ~ latitude, data = df)
+sm  <- summary(fit)
+
+slope_val <- coef(fit)[["latitude"]]
+r2_val    <- sm$r.squared
+p_val     <- sm$coefficients["latitude", "Pr(>|t|)"]
+t_val     <- sm$coefficients["latitude", "t value"]
+df_resid  <- sm$df[2]
+
+p_lab <- dplyr::case_when(
+  p_val < 0.001 ~ "italic(p) < 0.001",
+  p_val < 0.01  ~ paste0("italic(p) == ", sprintf("%.3f", p_val)),
+  TRUE          ~ paste0("italic(p) == ", sprintf("%.3f", p_val))
+)
+
+# Standardised residuals → flag outliers
+df <- df |>
+  mutate(std_resid  = rstandard(fit),
+         is_outlier = abs(std_resid) > 2)
+
+# ── 5. Regression summary print ────────────────────────────────────────────────
+cat("\n══════════════════════════════════════════\n")
+cat(" Latitude regression: DF_Total ~ latitude\n")
+cat("══════════════════════════════════════════\n")
+print(sm)
+cat(sprintf("\nSlope  = %+.5f  (SE = %.5f)\n", slope_val, sm$coefficients["latitude","Std. Error"]))
+cat(sprintf("t(%d)  = %.3f   p = %.4f\n", df_resid, t_val, p_val))
+cat(sprintf("R²     = %.4f\n\n", r2_val))
+
+# ── 6. Theme ───────────────────────────────────────────────────────────────────
+theme_pub <- theme_classic(base_size = 11, base_family = "sans") +
+  theme(
+    # Axes
+    axis.title      = element_text(size = 10, colour = "grey20"),
+    axis.text       = element_text(size = 9,  colour = "grey30"),
+    axis.line       = element_line(colour = "grey40", linewidth = 0.4),
+    axis.ticks      = element_line(colour = "grey40", linewidth = 0.3),
+    # Grid — horizontal only, very faint
+    panel.grid.major.y = element_line(colour = "grey92", linewidth = 0.3),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor   = element_blank(),
+    # Legend
+    legend.position    = "bottom",
+    legend.title       = element_blank(),
+    legend.text        = element_text(size = 9),
+    legend.key.size    = unit(4, "mm"),
+    legend.margin      = margin(t = 2),
+    # Strips (facet)
+    strip.background = element_rect(fill = "grey96", colour = "grey75", linewidth = 0.3),
+    strip.text       = element_text(size = 9, face = "plain"),
+    # Caption
+    plot.caption     = element_text(size = 7.5, colour = "grey50",
+                                    hjust = 0, margin = margin(t = 5)),
+    plot.title       = element_text(size = 12, face = "bold", colour = "grey10"),
+    plot.subtitle    = element_text(size = 9,  colour = "grey40",
+                                    margin = margin(b = 8))
+  )
+
+# Colour palette (colourblind-safe: Okabe-Ito inspired)
+col_north  <- "#0072B2"   # blue  — north/central/NE
+col_south  <- "#D55E00"   # vermilion — southern peninsula
+col_fit    <- "#CC3311"   # red — regression line
+col_ci     <- "#CC3311"   # CI ribbon (same hue, alpha below)
+col_out    <- "#E69F00"   # amber — outlier label
+
+# Annotation string for inset box
+ann_label <- paste0(
+  "italic(beta)[lat] == ", sprintf("%.5f", slope_val),
+  "~~R^2 == ",             sprintf("%.3f",  r2_val),
+  "~~t(", df_resid, ") == ", sprintf("%.2f", t_val),
+  "~~", p_lab
+)
+
+# ── 7. Main figure ─────────────────────────────────────────────────────────────
+p_main <- ggplot(df, aes(x = latitude, y = DF_Total)) +
+  
+  # 95 % CI ribbon
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE,
+              colour = col_fit, fill = col_ci, alpha = 0.12,
+              linewidth = 0.85) +
+  
+  # Points — shape encodes outlier status (circle vs triangle)
+  geom_point(aes(colour = region, shape = is_outlier),
+             size = 2.2, stroke = 0.3, alpha = 0.85) +
+  
+  # Outlier labels with repulsion
+  geom_text_repel(
+    data        = filter(df, is_outlier),
+    aes(label   = Province),
+    colour      = col_out,
+    size        = 2.7,
+    fontface    = "italic",
+    box.padding = 0.45,
+    point.padding = 0.3,
+    segment.colour = col_out,
+    segment.size   = 0.3,
+    max.overlaps   = 20,
+    min.segment.length = 0.2
+  ) +
+  
+  # 12°N reference line
+  geom_vline(xintercept = 12, linetype = "22",
+             colour = "grey55", linewidth = 0.5) +
+  annotate("text", x = 12.15, y = 0.760,
+           label = "12°N", hjust = 0, size = 2.8,
+           colour = "grey50", fontface = "plain") +
+  
+  # Stats annotation box — parsed expression
+  annotate("label",
+           x = 5.8, y = 1.003,
+           label = ann_label,
+           parse = TRUE,
+           hjust = 0, vjust = 1,
+           size  = 2.9,
+           colour = "grey20",
+           fill   = "white",
+           label.size = 0.25,
+           label.padding = unit(0.25, "lines")) +
+  
+  # Scales
+  scale_colour_manual(
+    values = c("North / Central / NE" = col_north,
+               "Southern peninsula"   = col_south)
+  ) +
+  scale_shape_manual(
+    values = c("FALSE" = 16, "TRUE" = 17),
+    guide  = "none"
+  ) +
+  scale_x_continuous(
+    breaks = seq(6, 20, by = 2),
+    labels = function(x) paste0(x, "°N"),
+    expand = expansion(add = 0.4)
+  ) +
+  scale_y_continuous(
+    breaks = seq(0.75, 1.00, by = 0.05),
+    labels = number_format(accuracy = 0.01),
+    expand = expansion(mult = c(0.03, 0.04))
+  ) +
+  
+  labs(
+    title    = "P-Index Predictive Utility by Province Latitude",
+    subtitle = paste0("Outcome: province-level median Spearman r (P-index vs. total dengue fever cases), 2012–2021 (n = ", nrow(df), ")"),
+    x        = "Province centroid latitude (°N)",
+    y        = expression("Median Spearman " * italic(r)),
+    caption  = paste0(
+      "OLS regression line with 95% pointwise confidence interval (shaded).",
+      "\nDashed vertical line: 12°N approximate peninsula boundary.",
+      "\nLabelled triangles: standardised residual > 2 (influential observations).",
+      "\nAll 77 Thai provinces included."
+    )
+  ) +
+  
+  theme_pub +
+  guides(colour = guide_legend(override.aes = list(size = 3, shape = 16)))
+
+# ── 8. Three-panel figure (all three outcomes) ────────────────────────────────
+df_long <- df |>
+  tidyr::pivot_longer(
+    cols      = c(DF_Total, DS_Total, DF_DS),
+    names_to  = "outcome",
+    values_to = "r"
+  ) |>
+  mutate(outcome = factor(outcome,
+                          levels = c("DF_Total", "DS_Total", "DF_DS"),
+                          labels = c("DF Total cases", "DS Total cases", "DF vs. DS ratio")))
+
+p_panel <- ggplot(df_long, aes(x = latitude, y = r)) +
+  
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE,
+              colour = col_fit, fill = col_ci, alpha = 0.12,
+              linewidth = 0.75) +
+  geom_point(aes(colour = region), size = 1.8, alpha = 0.80, shape = 16) +
+  geom_vline(xintercept = 12, linetype = "22",
+             colour = "grey55", linewidth = 0.4) +
+  
+  facet_wrap(~ outcome, ncol = 3, scales = "free_y") +
+  
+  scale_colour_manual(
+    values = c("North / Central / NE" = col_north,
+               "Southern peninsula"   = col_south)
+  ) +
+  scale_x_continuous(
+    breaks = c(8, 12, 16, 20),
+    labels = function(x) paste0(x, "°N")
+  ) +
+  scale_y_continuous(labels = number_format(accuracy = 0.01)) +
+  
+  labs(
+    title   = "P-Index Correlation vs. Latitude — All Dengue Outcomes",
+    x       = "Province centroid latitude (°N)",
+    y       = expression("Median Spearman " * italic(r)),
+    caption = "Red line = OLS fit with 95% CI.  Dashed vertical line = 12°N boundary."
+  ) +
+  theme_pub +
+  theme(strip.text = element_text(size = 8.5)) +
+  guides(colour = guide_legend(override.aes = list(size = 3)))
+
+print(p_main)
+
+print(p_panel)
+
+# ── 9. Save ───────────────────────────────────────────────────────────────────
+ggsave("Figure_latitude_regression_DF_Total.tiff",
+       plot   = p_main,
+       width  = 140, height = 110, units = "mm",
+       dpi    = 600, compression = "lzw")
+
+ggsave("Figure_latitude_regression_DF_Total.pdf",
+       plot   = p_main,
+       width  = 140, height = 110, units = "mm",
+       device = cairo_pdf)
+
+ggsave("Figure_latitude_regression_all_outcomes.tiff",
+       plot   = p_panel,
+       width  = 190, height = 80, units = "mm",
+       dpi    = 600, compression = "lzw")
+
+ggsave("Figure_latitude_regression_all_outcomes.pdf",
+       plot   = p_panel,
+       width  = 190, height = 80, units = "mm",
+       device = cairo_pdf)
+
+message("Figures saved (TIFF 600 dpi + PDF vector).")
+
+# ── 10. Regression table export ───────────────────────────────────────────────
+fits <- list(
+  DF_Total  = lm(DF_Total  ~ latitude, data = df),
+  DS_Total  = lm(DS_Total  ~ latitude, data = df),
+  DF_DS     = lm(DF_DS     ~ latitude, data = df),
+  Mean_corr = lm(mean_corr ~ latitude, data = df)
+)
+
+reg_table <- purrr::map_dfr(fits, ~{
+  tidy(.x) |>
+    filter(term == "latitude") |>
+    mutate(r2 = glance(.x)$r.squared,
+           adj_r2 = glance(.x)$adj.r.squared,
+           n = nrow(df))
+}, .id = "outcome") |>
+  select(outcome, n, slope = estimate, std_error = std.error,
+         t = statistic, p_value = p.value, r2, adj_r2) |>
+  mutate(across(where(is.numeric), ~round(.x, 5)))
+
+cat("\n═══════════════════════════════════════════════\n")
+cat(" Slope summary across all dengue outcomes\n")
+cat("═══════════════════════════════════════════════\n")
+print(reg_table)
+
+write.csv(reg_table, "Table_latitude_regression_slopes.csv", row.names = FALSE)
+message("Slope table saved: Table_latitude_regression_slopes.csv")
