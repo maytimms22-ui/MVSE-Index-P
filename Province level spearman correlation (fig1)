@@ -1,0 +1,130 @@
+install.packages("dplyr")
+install.packages("readxl")
+
+require(dplyr)
+require(readxl)
+
+dengue_data <- read_excel("~/Downloads/dengue_case_2012-2021.xlsx")
+
+head(dengue_data)
+str(dengue_data)
+
+#Using cor() function for PAIRWISE CORRELATIONS
+cor_matrix <- cor(dengue_data[, c("DF", "DS", "Total")],
+                  method = "spearman",
+                  use = "complete.obs")
+
+print("Spearman's Correlation Matrix:")
+print(cor_matrix)
+
+provincial_correlations <- dengue_data %>%
+  group_by(province) %>%
+  summarise(
+    DF_DS_correlation = cor(DF, DS, method = "spearman", use = "complete.obs"),
+    DS_Total_correlation = cor(DS, Total, method = "spearman", use = "complete.obs"),
+    Total_DF_correlation = cor(Total, DF, method = "spearman", use = "complete.obs"),
+    n_observations = n()
+  ) %>%
+  filter(n_observations >= 12) %>%
+  select(-n_observations)
+
+thailand_provinces <- st_read("~/Downloads/gadm41_THA_shp/gadm41_THA_1.shp")
+thailand_provinces <- thailand_provinces %>%
+  mutate(
+    province_clean = case_when(
+      NAME_1 == "Bangkok Metropolis" ~ "Bangkok",
+      NAME_1 == "Amnat Charoen" ~ "Amnat Charoen",
+      NAME_1 == "Ang Thong" ~ "Ang Thong",
+      NAME_1 == "Bueng Kan" ~ "Bueng Kan",
+      NAME_1 == "Buriram" ~ "Buri Ram",
+      NAME_1 == "Chachoengsao" ~ "Chachoengsao",
+      NAME_1 == "Chai Nat" ~ "Chai Nat",
+      NAME_1 == "Chaiyaphum" ~ "Chaiyaphum",
+      NAME_1 == "Chanthaburi" ~ "Chanthaburi",
+      NAME_1 == "Chiang Mai" ~ "Chiang Mai",
+      NAME_1 == "Chiang Rai" ~ "Chiang Rai",
+      NAME_1 == "Chon Buri" ~ "Chon Buri",
+      TRUE ~ NAME_1
+    )
+  )
+
+thailand_correlations <- thailand_provinces %>%
+  left_join(provincial_correlations, by = c("province_clean" = "province"))
+
+# Map 1: DF vs DS correlation
+map_df_ds <- ggplot(thailand_correlations) +
+  geom_sf(aes(fill = DF_DS_correlation), color = "white", size = 0.2) +
+  scale_fill_viridis(
+    name = "Spearman Correlation\n(DF vs DS)",
+    option = "plasma",
+    limits = c(-1, 1),
+    na.value = "grey80"
+  ) +
+  labs(
+    title = "Provincial-Level Spearman Correlation: DF vs DS",
+    subtitle = "10-Year Dengue Data (2012-2021)"
+  ) +
+  theme_void() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.position = "right"
+  )
+
+print(map_df_ds)
+
+# Map 2: DS vs Total correlation
+map_ds_total <- ggplot(thailand_correlations) +
+  geom_sf(aes(fill = DS_Total_correlation), color = "white", size = 0.2) +
+  scale_fill_viridis(
+    name = "Spearman Correlation\n(DS vs Total)",
+    option = "plasma",
+    limits = c(-1, 1),
+    na.value = "grey80"
+  ) +
+  labs(
+    title = "Provincial-Level Spearman Correlation: DS vs Total",
+    subtitle = "10-Year Dengue Data (2012-2021)"
+  ) +
+  theme_void() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.position = "right"
+  )
+
+print(map_ds_total)
+
+# Map 3: Total vs DF correlation
+map_total_df <- ggplot(thailand_correlations) +
+  geom_sf(aes(fill = Total_DF_correlation), color = "white", size = 0.2) +
+  scale_fill_viridis(
+    name = "Spearman Correlation\n(Total vs DF)",
+    option = "plasma",
+    limits = c(-1, 1),
+    na.value = "grey80"
+  ) +
+  labs(
+    title = "Provincial-Level Spearman Correlation: Total vs DF",
+    subtitle = "10-Year Dengue Data (2012-2021)"
+  ) +
+  theme_void() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.position = "right"
+  )
+
+print(map_total_df)
+
+
+your_provinces <- unique(dengue_data$province)
+shapefile_provinces <- unique(thailand_provinces$NAME_1)
+setdiff(your_provinces, shapefile_provinces)
+setdiff(shapefile_provinces, your_provinces)     
+
+print("Your dengue data provinces:")
+print(sort(your_provinces))
+
+print("Shapefile provinces:")
+print(sort(shapefile_provinces))
