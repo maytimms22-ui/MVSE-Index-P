@@ -4,7 +4,6 @@
 #  Provinces: n = 77  |  Period: 2012–2021
 # =============================================================================
 
-# ── 0. Packages ───────────────────────────────────────────────────────────────
 pkgs <- c("readxl", "dplyr", "ggplot2", "ggrepel", "broom", "tidyr",
           "scales", "patchwork")
 invisible(lapply(pkgs, function(p) {
@@ -142,16 +141,13 @@ ann_label <- paste0(
 # ── 7. Main figure ─────────────────────────────────────────────────────────────
 p_main <- ggplot(df, aes(x = latitude, y = DF_Total)) +
   
-  # 95 % CI ribbon
   geom_smooth(method = "lm", formula = y ~ x, se = TRUE,
               colour = col_fit, fill = col_ci, alpha = 0.12,
               linewidth = 0.85) +
   
-  # Points — shape encodes outlier status (circle vs triangle)
   geom_point(aes(colour = region, shape = is_outlier),
              size = 2.2, stroke = 0.3, alpha = 0.85) +
   
-  # Outlier labels with repulsion
   geom_text_repel(
     data        = filter(df, is_outlier),
     aes(label   = Province),
@@ -166,14 +162,12 @@ p_main <- ggplot(df, aes(x = latitude, y = DF_Total)) +
     min.segment.length = 0.2
   ) +
   
-  # 12°N reference line
   geom_vline(xintercept = 12, linetype = "22",
              colour = "grey55", linewidth = 0.5) +
   annotate("text", x = 12.15, y = 0.760,
            label = "12°N", hjust = 0, size = 2.8,
            colour = "grey50", fontface = "plain") +
-  
-  # Stats annotation box — parsed expression
+
   annotate("label",
            x = 5.8, y = 1.003,
            label = ann_label,
@@ -185,7 +179,6 @@ p_main <- ggplot(df, aes(x = latitude, y = DF_Total)) +
            label.size = 0.25,
            label.padding = unit(0.25, "lines")) +
   
-  # Scales
   scale_colour_manual(
     values = c("North / Central / NE" = col_north,
                "Southern peninsula"   = col_south)
@@ -205,7 +198,7 @@ p_main <- ggplot(df, aes(x = latitude, y = DF_Total)) +
     expand = expansion(mult = c(0.03, 0.04))
   ) +
   
-  labs(
+    labs(
     title    = "P-Index Predictive Utility by Province Latitude",
     subtitle = paste0("Outcome: province-level median Spearman r (P-index vs. total dengue fever cases), 2012–2021 (n = ", nrow(df), ")"),
     x        = "Province centroid latitude (°N)",
@@ -217,11 +210,21 @@ p_main <- ggplot(df, aes(x = latitude, y = DF_Total)) +
       "\nAll 77 Thai provinces included."
     )
   ) +
-  
   theme_pub +
-  guides(colour = guide_legend(override.aes = list(size = 3, shape = 16)))
+  theme(
+    plot.title    = element_text(size = 15, face = "bold"),
+    plot.subtitle = element_text(size = 12),
+    axis.title    = element_text(size = 10),
+    axis.text     = element_text(size = 10),
+    plot.caption  = element_text(size = 11),
+    legend.text   = element_text(size = 10),
+    legend.title  = element_text(size = 8)
+  ) +
+  guides(colour = guide_legend(override.aes = list(size = 10, shape = 16)))
 
-# ── 8. Three-panel figure (all three outcomes) ────────────────────────────────
+print(p_main)
+
+# ── 8. Three-panel figure (all three outcomes) (NOT USED) ────────────────────────────────
 df_long <- df |>
   tidyr::pivot_longer(
     cols      = c(DF_Total, DS_Total, DF_DS),
@@ -313,6 +316,3 @@ cat("\n════════════════════════�
 cat(" Slope summary across all dengue outcomes\n")
 cat("═══════════════════════════════════════════════\n")
 print(reg_table)
-
-write.csv(reg_table, "Table_latitude_regression_slopes.csv", row.names = FALSE)
-message("Slope table saved: Table_latitude_regression_slopes.csv")
