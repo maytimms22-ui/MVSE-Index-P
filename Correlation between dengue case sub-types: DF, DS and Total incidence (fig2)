@@ -4,15 +4,6 @@
 # Period: 2012–2021
 # =============================================================================
 
-# --- 0. WORKING DIRECTORY ----------------------------------------------------
-# Set this to the folder containing all five data files.
-# Option A – point explicitly to your data folder:
-#   setwd("C:/Users/YourName/Documents/DengueData")   # Windows
-#   setwd("~/Documents/DengueData")                    # Mac/Linux
-#
-# Option B – use the script's own location (recommended):
-#   In RStudio: Session > Set Working Directory > To Source File Location
-#   Or run this line (requires the 'rstudioapi' package):
 if (requireNamespace("rstudioapi", quietly = TRUE) &&
     rstudioapi::isAvailable()) {
   setwd(dirname(rstudioapi::getSourceEditorContext()$path))
@@ -34,8 +25,6 @@ for (pkg in required_packages) {
 }
 
 # --- 2. REGION MAPPING -------------------------------------------------------
-# Thailand Ministry of Public Health 4 macro-epidemiological regions.
-# Non-breaking spaces (\u00a0) in province names are handled by stringr below.
 
 region_map <- data.frame(
   Province = c(
@@ -81,7 +70,6 @@ region_map$Region <- factor(region_map$Region, levels = region_levels)
 cat("Province count per region in mapping:\n")
 print(table(region_map$Region))
 
-# Helper: strip non-breaking spaces from province names
 clean_province <- function(x) gsub("\u00a0", " ", trimws(x))
 
 # --- 3. LOAD & JOIN OVERALL CORRELATIONS ------------------------------------
@@ -180,17 +168,7 @@ cat("\n\n====== ANNUAL REGIONAL MEDIAN HUMIDITY INDEX ======\n")
 print(knitr::kable(annual_reg, format = "simple"))
 
 # --- 8. PUBLICATION-QUALITY PLOTS -------------------------------------------
-# Design standards:
-#   - Colourblind-safe palette (Wong 2011, Nature Methods)
-#   - Base font size 11 pt (fits single-column journal width ~88 mm)
-#   - All text in serif (Times-compatible) via windowsFonts() fallback
-#   - White background, full axis box, no minor gridlines
-#   - 600 dpi TIFF output (standard for most journals)
-#   - Figure panels labelled A/B/C with patchwork
-#   - Axis titles use proper unicode (Spearman r, ±, ×)
-# -------------------------------------------------------------------------
 
-# Colourblind-safe palette (Wong 2011)
 region_colours <- c(
   "North"     = "#0072B2",   # blue
   "Northeast" = "#E69F00",   # orange
@@ -200,7 +178,6 @@ region_colours <- c(
 region_shapes <- c("North" = 21, "Northeast" = 22,
                    "Central" = 23, "South" = 24)
 
-# Publication base theme
 theme_pub <- function(base_size = 11) {
   theme_classic(base_size = base_size) +
     theme(
@@ -211,23 +188,19 @@ theme_pub <- function(base_size = 11) {
       axis.text        = element_text(colour = "black", size = base_size - 1),
       axis.title       = element_text(colour = "black", size = base_size,
                                       face = "plain"),
-      # Panel
       panel.border     = element_rect(colour = "black", fill = NA,
                                       linewidth = 0.5),
       panel.background = element_rect(fill = "white"),
       panel.grid.major = element_line(colour = "grey92", linewidth = 0.3),
       panel.grid.minor = element_blank(),
-      # Legend
       legend.title     = element_text(size = base_size - 1, face = "bold"),
       legend.text      = element_text(size = base_size - 2),
       legend.key.size  = unit(10, "pt"),
       legend.background = element_rect(fill = "white", colour = NA),
       legend.key       = element_rect(fill = "white", colour = NA),
-      # Strip (facets)
       strip.background = element_rect(fill = "grey95", colour = "black",
                                       linewidth = 0.4),
       strip.text       = element_text(face = "bold", size = base_size - 1),
-      # Titles removed at panel level; added via patchwork tags
       plot.title       = element_blank(),
       plot.subtitle    = element_blank(),
       plot.margin      = margin(4, 6, 4, 6, "pt")
@@ -236,15 +209,6 @@ theme_pub <- function(base_size = 11) {
 
 # ── FIGURE 1: Three-panel box + jitter (one per correlation type) ─────────
 #    Panel A: DF vs DS   B: DS vs Total   C: DF vs Total
-#
-#    Layout fixes for readability:
-#      - Double-column width (180 mm) so x-axis labels have room to breathe
-#      - Short, consistent y-axis title shared across all panels via a single
-#        left-side label (using patchwork plot_annotation + theme tricks)
-#      - Panel subtitle (bold) names the comparison inside each panel
-#      - Generous plot margins and increased base font size (12 pt)
-#      - x-axis region labels angled 30° to prevent overlap
-#      - KW p-value placed inside upper-left corner (avoids right-side crowding)
 
 make_box_pub <- function(data, y, panel_title) {
   
@@ -255,24 +219,19 @@ make_box_pub <- function(data, y, panel_title) {
                     sprintf("italic(P) == %.3f", kw_p))
   
   ggplot(data, aes(x = Region, y = .data[[y]])) +
-    # Raw jittered points (behind box)
     geom_jitter(aes(fill = Region), shape = 21, colour = "white",
                 width = 0.16, size = 2.2, alpha = 0.65, stroke = 0.35) +
-    # Boxplot (no outlier symbols — raw data already shown)
     geom_boxplot(aes(fill = Region), colour = "black",
                  outlier.shape = NA, alpha = 0.40,
                  width = 0.42, linewidth = 0.45,
                  staplewidth = 0.25) +
-    # Median diamond overlay
     stat_summary(fun = median, geom = "point",
                  shape = 18, size = 4, colour = "black") +
-    # KW p-value — upper LEFT, inside panel
     annotate("text", x = -Inf, y = Inf,
              label = p_label, parse = TRUE,
              hjust = -0.1, vjust = 1.6,
              size = 3.4, colour = "grey25", fontface = "italic") +
     scale_fill_manual(values = region_colours, guide = "none") +
-    # Shared y-axis: short label, consistent breaks
     scale_y_continuous(
       name   = "Spearman r",
       limits = c(0.15, 1.08),
@@ -288,7 +247,6 @@ make_box_pub <- function(data, y, panel_title) {
       plot.title   = element_text(face = "bold", size = 11,
                                   hjust = 0.5,
                                   margin = margin(b = 4)),
-      # Angle x labels so "Northeast" doesn't collide with "Central"
       axis.text.x  = element_text(angle = 30, hjust = 1, vjust = 1,
                                   size = 11),
       axis.title.y = element_text(size = 11),
@@ -319,7 +277,6 @@ fig1 <- (pA / pB / pC) +
 
 print(fig1)
 
-# Double-column width (180 mm), taller to give each panel room
 ggsave("Figure1_Regional_Boxplots.tiff", fig1,
        width = 180, height = 240, units = "mm", dpi = 600,
        compression = "lzw")
@@ -380,7 +337,6 @@ heat <- annual_reg %>%
   mutate(Year   = factor(Year),
          Region = factor(Region, levels = rev(region_levels)))
 
-# Determine text colour based on fill value (dark text on light tiles)
 heat_mid <- median(heat$median_index, na.rm = TRUE)
 
 fig3 <- ggplot(heat, aes(x = Year, y = Region, fill = median_index)) +
@@ -425,7 +381,6 @@ ggsave("Figure3_Heatmap_Region_Year.pdf",  fig3,
 cat("Figure 3 saved (TIFF + PDF)\n")
 
 # ── FIGURE 4: Half-violin + box + jitter (DF_Total) ──────────────────────
-# Uses ggdist for the half-violin (rain cloud plot style)
 
 if (!requireNamespace("ggdist", quietly = TRUE))
   install.packages("ggdist", quiet = TRUE)
@@ -434,7 +389,6 @@ library(ggdist)
 fig4 <- ggplot(corr_ok,
                aes(x = Region, y = DF_Total,
                    fill = Region, colour = Region)) +
-  # Half-violin on right
   stat_halfeye(
     aes(fill = Region),
     adjust      = 0.8,
@@ -445,7 +399,6 @@ fig4 <- ggplot(corr_ok,
     .width      = 0,
     colour      = NA
   ) +
-  # Box in centre
   geom_boxplot(
     colour   = "black",
     fill     = "white",
@@ -454,7 +407,6 @@ fig4 <- ggplot(corr_ok,
     linewidth = 0.45,
     staplewidth = 0.25
   ) +
-  # Raw points on left
   geom_jitter(shape = 21, colour = "white", stroke = 0.35,
               width = 0.08, size = 1.8, alpha = 0.7) +
   scale_fill_manual(values   = region_colours, guide = "none") +
